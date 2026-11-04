@@ -35,7 +35,7 @@ jobs:
           MYSYNC_CLIENT_SOURCE: ${{ github.workspace }}/mysyncfiles-client
         run: |
           for suite in tpm_flow web_status_flow multi_server_flow; do
-            binary=$(cargo test --locked --manifest-path integration/Cargo.toml --test "$suite" --no-run --message-format=json | jq -r 'select(.reason == "compiler-artifact" and .executable != null) | .executable' | tail -1)
+            binary=$(cargo test --locked --manifest-path integration/Cargo.toml --test "$suite" --no-run --message-format=json | jq -er --arg suite "$suite" 'select(.reason == "compiler-artifact" and .target.kind == ["test"] and .target.name == $suite and .executable != null) | .executable')
             test -x "$binary"
             for runtime in debian:13-slim archlinux:base; do
               docker build --build-arg BASE_IMAGE="$runtime" -t mysync-tpm-runtime -f deploy/Dockerfile.tpm-runtime .
