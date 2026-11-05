@@ -203,26 +203,48 @@ pub use crate::auth_protocol::{normalize_pairing_code, pairing_code};
 
 pub fn register_pair(state: &ServerState, name: &str, code: &str) -> Result<String> {
     let code = normalize_pairing_code(code)?;
-    let hash = hash(&code);
-    {
-        let db = state.db.lock().unwrap();
-        let existing: Option<(String, String, Option<i64>, i64)> = db
-            .query_row(
-                "SELECT e.id,d.name,e.approved_at,e.expires_at FROM device_enrollments e JOIN devices d ON d.id=e.device_id WHERE e.invitation_hash=?1",
-                [&hash],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .optional()?;
-        if let Some((id, old_name, approved, expires)) = existing {
-            ensure!(
-                old_name == name && approved.is_none() && expires > now(),
-                "pairing code is already used or expired"
-            );
-            return Ok(id);
-        }
-    }
     insert_invitation(state, name, &code)
 }
+
+/// Replace exactly the unapproved invitation confirmed by the administrator.
+/// Cancellation and registration share a transaction, so a concurrent approval
+/// or a failed registration leaves the original enrollment unchanged.
+pub fn replace_pending_pair(
+    state: &ServerState,
+    name: &str,
+    code: &str,
+    pending_id: &str,
+) -> Result<String> {
+    let code = normalize_pairing_code(code)?;
+    insert_invitation_replacing(state, name, &code, Some(pending_id))
+}
+
+#[derive(Debug)]
+pub struct EnrollmentConflict {
+    pub id: String,
+    pub name: String,
+    pub approved: bool,
+}
+
+impl std::fmt::Display for EnrollmentConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.approved {
+            write!(
+                f,
+                "device {:?} is already enrolled; resume its existing client profile or choose a different device name for a new pairing",
+                self.name
+            )
+        } else {
+            write!(
+                f,
+                "device {:?} has a pending invitation (id={}); resume with the same name and client code, or run make pair to replace this invitation after confirmation",
+                self.name, self.id
+            )
+        }
+    }
+}
+
+impl std::error::Error for EnrollmentConflict {}
 
 pub fn enrollment_by_id(state: &ServerState, id: &str) -> Result<DeviceEnrollment> {
     list(state)?
@@ -252,6 +274,15 @@ pub fn invite_to_file(state: &ServerState, name: &str, path: &Path) -> Result<()
 }
 
 fn insert_invitation(state: &ServerState, name: &str, token: &str) -> Result<String> {
+    insert_invitation_replacing(state, name, token, None)
+}
+
+fn insert_invitation_replacing(
+    state: &ServerState,
+    name: &str,
+    token: &str,
+    pending_id: Option<&str>,
+) -> Result<String> {
     ensure!(
         !name.trim().is_empty() && name.len() <= 255,
         "invalid device name"
@@ -262,6 +293,27 @@ fn insert_invitation(state: &ServerState, name: &str, token: &str) -> Result<Str
         setting(&tx, "ek_roots")?.is_some(),
         "configure the public URL and EK CA roots first"
     );
+    let timestamp = now();
+    let existing_code: Option<(String, String, bool, i64, bool)> = tx
+        .query_row(
+            "SELECT e.id,d.name,e.approved_at IS NOT NULL,e.expires_at,d.revoked_at IS NOT NULL
+             FROM device_enrollments e JOIN devices d ON d.id=e.device_id
+             WHERE e.invitation_hash=?1",
+            [hash(token)],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+    if let Some((id, old_name, approved, expires, revoked)) = existing_code {
+        ensure!(
+            old_name == name && !approved && expires > timestamp && !revoked,
+            "pairing code is already used, expired or revoked; rerun client setup and use the code it displays"
+        );
+        ensure!(
+            pending_id.is_none() || pending_id == Some(id.as_str()),
+            "pending invitation changed; run make pair again"
+        );
+        return Ok(id);
+    }
     let existing: Option<(i64, Option<i64>)> = tx
         .query_row(
             "SELECT id,revoked_at FROM devices WHERE name=?1",
@@ -270,7 +322,10 @@ fn insert_invitation(state: &ServerState, name: &str, token: &str) -> Result<Str
         )
         .optional()?;
     let id = if let Some((id, revoked)) = existing {
-        ensure!(revoked.is_none(), "revoked name; use a new device name");
+        ensure!(
+            revoked.is_none(),
+            "revoked device name; use a new device name"
+        );
         id
     } else {
         tx.execute(
@@ -279,14 +334,38 @@ fn insert_invitation(state: &ServerState, name: &str, token: &str) -> Result<Str
         )?;
         tx.last_insert_rowid()
     };
-    let occupied:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM device_enrollments WHERE device_id=?1 AND (approved_at IS NOT NULL OR expires_at>?2))",params![id,now()],|r|r.get(0))?;
-    ensure!(
-        !occupied,
-        "device already enrolled or an invitation is pending"
-    );
+    let occupied: Option<(String, bool)> = tx
+        .query_row(
+            "SELECT id,approved_at IS NOT NULL FROM device_enrollments
+             WHERE device_id=?1 AND (approved_at IS NOT NULL OR expires_at>?2)
+             ORDER BY approved_at IS NOT NULL DESC LIMIT 1",
+            params![id, timestamp],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((enrollment_id, approved)) = occupied {
+        if approved || pending_id != Some(enrollment_id.as_str()) {
+            return Err(EnrollmentConflict {
+                id: enrollment_id,
+                name: name.to_owned(),
+                approved,
+            }
+            .into());
+        }
+        tx.execute(
+            "UPDATE device_enrollments SET expires_at=0,activation_hash=NULL,challenge=NULL
+             WHERE id=?1 AND approved_at IS NULL",
+            [&enrollment_id],
+        )?;
+    } else {
+        ensure!(
+            pending_id.is_none(),
+            "pending invitation changed or expired; run make pair again"
+        );
+    }
     let enrollment_id = uuid::Uuid::new_v4().to_string();
     tx.execute("INSERT INTO device_enrollments(id,device_id,invitation_hash,expires_at) VALUES(?1,?2,?3,?4)",
-        params![enrollment_id,id,hash(token),now()+900])?;
+        params![enrollment_id,id,hash(token),timestamp+900])?;
     tx.commit()?;
     Ok(enrollment_id)
 }

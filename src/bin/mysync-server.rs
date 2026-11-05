@@ -22,6 +22,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Read the server ID, device counts and storage summary without changing the instance
+    Info {
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the origin public key to convey to clients through a trusted channel
     ServerKey {
         #[arg(long)]
@@ -147,10 +154,40 @@ async fn pair(data_dir: PathBuf) -> Result<()> {
     }
     let state = server::open(data_dir)?;
     println!("Server public key: {}", state.public_key());
-    println!("Give this key directly to the client before entering its pairing code.");
+    println!(
+        "This is the Server ID requested by the client. You can also read it with `make get`."
+    );
+    println!("Give this key directly to the client, then enter the code it displays here.");
+    println!("Keep this terminal open through fingerprint approval; one `make pair` is enough.");
     let name = prompt_line("Device name: ")?;
     let code = rpassword::prompt_password("Code shown by the client: ")?;
-    let id = mysyncfiles_server::device_auth::register_pair(&state, &name, &code)?;
+    let id = match mysyncfiles_server::device_auth::register_pair(&state, &name, &code) {
+        Ok(id) => id,
+        Err(error) => {
+            let Some(conflict) = error
+                .downcast_ref::<mysyncfiles_server::device_auth::EnrollmentConflict>()
+                .filter(|conflict| !conflict.approved)
+            else {
+                return Err(error);
+            };
+            println!("{conflict}");
+            println!("Replacing it cancels the previous code and its pending TPM proof.");
+            let answer = prompt_line(
+                "Replace this pending invitation with the current client code? [y/N] ",
+            )?;
+            if !matches!(answer.as_str(), "y" | "Y" | "yes" | "YES") {
+                bail!(
+                    "invitation unchanged; resume with the original code or choose another device name"
+                );
+            }
+            mysyncfiles_server::device_auth::replace_pending_pair(
+                &state,
+                &name,
+                &code,
+                &conflict.id,
+            )?
+        }
+    };
     println!("Waiting for the client's TPM proof (up to 15 minutes)...");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(900);
     let fingerprint = loop {
@@ -167,7 +204,7 @@ async fn pair(data_dir: PathBuf) -> Result<()> {
         }
         if tokio::time::Instant::now() >= deadline {
             bail!(
-                "timed out waiting for TPM proof; rerun this command with the same code to resume"
+                "timed out waiting for TPM proof; rerun client setup and make pair using the code it displays"
             );
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -188,6 +225,31 @@ async fn pair(data_dir: PathBuf) -> Result<()> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::Info { data_dir, json } => {
+            let info = server::instance_info(data_dir)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&info)?);
+            } else {
+                println!("Server name: {}", info.server_name);
+                println!("Server ID (public key): {}", info.server_id);
+                println!(
+                    "Public URL: {}",
+                    info.public_url.as_deref().unwrap_or("not configured")
+                );
+                println!("Approved devices: {}", info.approved_devices);
+                println!("Pending invitations: {}", info.pending_invitations);
+                println!("Revoked devices: {}", info.revoked_devices);
+                println!("Authentication is per device; there are no separate user accounts.");
+                println!("Files: {} ({} bytes)", info.files, info.file_bytes);
+                println!("Trash: {} ({} bytes)", info.trash_files, info.trash_bytes);
+                println!(
+                    "Uploads: {} ({} bytes received)",
+                    info.uploads, info.upload_bytes
+                );
+                println!("Filesystem capacity: {} bytes", info.disk_total_bytes);
+                println!("Filesystem available: {} bytes", info.disk_available_bytes);
+            }
+        }
         Command::ServerKey { data_dir } => println!("{}", server::open(data_dir)?.public_key()),
         Command::Init { data_dir, name } => {
             let state = server::open(&data_dir)?;

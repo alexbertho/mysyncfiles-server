@@ -36,7 +36,7 @@ L'installateur transmet le même certificat à `mysync setup`. Pour Intel PTT, l
 
 ## Appairer et approuver un appareil
 
-Le client demande d'abord la clé publique du serveur. `make pair` l'affiche sur le terminal administrateur : la transmettre directement par un canal fiable et la saisir sur le client. Cette clé protège les fichiers contre la falsification des réponses par un proxy TLS. Pour éviter la saisie, utiliser `mysync setup --server-public-key CLE_HEX ...` ou transmettre `MYSYNC_SERVER_PUBLIC_KEY=CLE_HEX` à l'installateur. Pour les profils déjà activés, suivre la [migration](device-auth.md#authenticite-des-reponses-et-migration).
+Le client demande d'abord le Server ID (la clé publique du serveur). `make get` l'affiche sur le terminal administrateur sans ouvrir d'appairage : la transmettre directement par un canal fiable et la saisir sur le client. Cette clé protège les fichiers contre la falsification des réponses par un proxy TLS. Pour éviter la saisie, utiliser `mysync setup --server-public-key CLE_HEX ...` ou transmettre `MYSYNC_SERVER_PUBLIC_KEY=CLE_HEX` à l'installateur. Pour les profils déjà activés, suivre la [migration](device-auth.md#authenticite-des-reponses-et-migration).
 
 Le client affiche un code à usage unique, puis attend. Sur l'hôte serveur, depuis le dépôt et avec `deploy/.env` configuré :
 
@@ -44,7 +44,7 @@ Le client affiche un code à usage unique, puis attend. Sur l'hôte serveur, dep
 make pair
 ```
 
-Saisir le nom de l'appareil et le code affiché sur le client. Après vérification du certificat EK et de la preuve TPM, comparer **l'empreinte complète** affichée par les deux commandes, par un canal fiable, puis confirmer sur le serveur. Le code seul ne donne pas accès aux fichiers. Il est enregistré sous forme de hash et expire au bout de 15 minutes s'il n'a pas été utilisé. La commande serveur et le client peuvent être relancés pour reprendre une demande en cours ; une demande expirée ou annulée nécessite un nouveau code. Le client attend au plus 30 minutes par exécution.
+Si `make pair` est déjà ouvert pour lire la clé, continuer dans ce terminal. Saisir le nom de l'appareil et le code affiché sur le client, puis garder la commande ouverte. Après vérification du certificat EK et de la preuve TPM, comparer **l'empreinte complète** affichée par les deux commandes, par un canal fiable, puis confirmer sur le serveur. Le code seul ne donne pas accès aux fichiers. Il est enregistré sous forme de hash et expire au bout de 15 minutes s'il n'a pas été utilisé. La commande serveur et le client peuvent être relancés avec le même nom et le même code pour reprendre une demande en cours ; une demande expirée ou annulée nécessite un nouveau code. Un nouveau code pour un nom réservé propose de remplacer l'invitation en attente après confirmation, sans remplacer un appareil approuvé. Le client attend au plus 30 minutes par exécution.
 
 Si l'installateur a été lancé sans terminal, démarrer l'appairage sur le client avec :
 

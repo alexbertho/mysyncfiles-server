@@ -73,4 +73,4 @@ Utiliser ensuite l'[origine publique et les racines EK vérifiées](device-auth.
 
 [Publier un binaire signé](operations.md#publier-un-client-signe) pour chaque architecture cliente utilisée. Cette publication est une opération distincte de `make install` et `make start`. Tant qu'aucune release compatible n'est publiée, le script d'installation ne peut pas installer de client.
 
-Vérifier depuis l'extérieur que l'origine HTTPS sert `/install.sh` et que le certificat TLS est valide. Pour chaque client, lancer `make pair` après l'affichage de son code d'appairage, puis suivre le [guide client](install-client.md#appairer-et-approuver-un-appareil).
+Vérifier depuis l'extérieur que l'origine HTTPS répond et que le certificat TLS est valide. `make get` affiche le Server ID (clé publique), les appareils et le stockage sans ouvrir d'appairage. Transmettre cette clé au client par un canal fiable. Installer le client depuis son dépôt GitHub, puis saisir son code dans `make pair` ; si cette commande est déjà ouverte, continuer dans ce terminal. Suivre le [guide client](install-client.md#appairer-et-approuver-un-appareil).

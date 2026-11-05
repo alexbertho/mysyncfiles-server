@@ -8,7 +8,7 @@ MYSYNC_TEST_CPUS ?= 2
 MYSYNC_CARGO_JOBS ?= 1
 MYSYNC_BENCH_ARGS ?= --suite all --repetitions 3 --work-dir target
 
-.PHONY: help check-config check-server-image install start stop logs pair test test-unlocked benchmark test-integration deploy clean docs docs-stop docs-check docs-build editor-build editor-check
+.PHONY: help check-config check-server-image install start stop logs get pair test test-unlocked benchmark test-integration deploy clean docs docs-stop docs-check docs-build editor-build editor-check
 
 help:
 	@printf '%s\n' \
@@ -16,6 +16,7 @@ help:
 		'make start       Démarrer le serveur' \
 		'make stop        Arrêter le serveur sans supprimer les données' \
 		'make logs        Suivre les journaux du serveur' \
+		'make get         Afficher le Server ID, les appareils et le stockage' \
 		'make pair        Appairer un client par son code temporaire' \
 		'make test        Tests serveur et protocole, sans pilote ni simulateur TPM' \
 		'make test-integration Échange client/serveur réel avec swtpm' \
@@ -62,6 +63,9 @@ stop:
 
 logs:
 	$(COMPOSE_SERVER) logs -f server
+
+get: check-config check-server-image
+	$(COMPOSE_SERVER) run --rm --no-deps -T server info --data-dir /data
 
 pair: check-config check-server-image
 	$(COMPOSE_SERVER) run --rm server device pair --data-dir /data
