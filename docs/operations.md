@@ -14,6 +14,21 @@ Les téléchargements de releases peuvent suivre au plus cinq redirections HTTPS
 
 La version 0.4 exige une mise à jour coordonnée. La séparation des sources ne publie pas une release signée et ne remplace aucun binaire installé. Conserver les profils, états et clés TPM existants ; sauvegarder la base avant toute intervention de production.
 
+## Consulter l'instance
+
+Depuis le dépôt serveur, `make get` affiche le nom, le **Server ID (clé publique)** à transmettre au client, l'origine publique, les nombres d'appareils approuvés/révoqués et d'invitations en attente, ainsi que les fichiers et le stockage. Cette commande lit l'instance existante sans créer d'invitation, purger des données ni initialiser une nouvelle base. Elle fonctionne sans terminal interactif et sans démarrer le service serveur.
+
+MySyncFiles authentifie des appareils TPM et ne possède pas de comptes utilisateurs distincts : le nombre d'appareils approuvés n'est pas un décompte de personnes. Les tailles des fichiers, de la corbeille (y compris les éléments expirés encore présents) et des transferts reçus sont des octets logiques. La capacité et l'espace disponible concernent tout le système de fichiers du dossier de données, et non un quota propre à l'instance ; les fichiers SQLite et leurs journaux ne sont pas inclus dans les tailles logiques.
+
+Hors Docker : `mysync-server info --data-dir DOSSIER`. Pour une sortie structurée :
+
+```sh
+docker compose --env-file deploy/.env -f deploy/compose.yaml run --rm --no-deps -T \
+  server info --data-dir /data --json
+```
+
+Le Server ID correspond exactement à la valeur de `mysync-server server-key` ; aucune nouvelle identité n'est créée.
+
 ## Administrer les appareils
 
 Le parcours recommandé est `make pair` : l'administrateur saisit le code affiché sur le client, attend la preuve TPM et confirme l'empreinte complète. La [procédure client](install-client.md#appairer-et-approuver-un-appareil) donne les commandes. Les sous-commandes `device` sont locales au serveur, jamais des routes HTTP d'administration. Le code enregistré expire après 15 minutes s'il n'est pas utilisé ; l'appairage en attente peut être annulé avec `device cancel --id ID --data-dir /data`. Le parcours manuel par invitation reste disponible.

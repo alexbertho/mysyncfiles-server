@@ -29,10 +29,13 @@ use crate::model::{
     UPLOAD_CHUNK_BYTES, UploadProgress, valid_path,
 };
 
+mod info;
 mod origin;
 mod web_assets;
 mod web_files;
 mod web_status;
+
+pub use info::{InstanceInfo, instance_info};
 
 const RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
 const UPLOAD_SESSION_SECONDS: i64 = 24 * 60 * 60;

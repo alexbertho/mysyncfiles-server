@@ -22,6 +22,10 @@ pub(crate) fn load_key(db: &Connection) -> Result<SigningKey> {
         "INSERT OR IGNORE INTO auth_settings(key,value) VALUES('origin_signing_key',?1)",
         [random_secret()?],
     )?;
+    read_key(db)
+}
+
+pub(crate) fn read_key(db: &Connection) -> Result<SigningKey> {
     let value: String = db.query_row(
         "SELECT value FROM auth_settings WHERE key='origin_signing_key'",
         [],

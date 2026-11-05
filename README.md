@@ -25,13 +25,19 @@ L’installateur demande un nom d’affichage au serveur. Configurer ensuite le 
 curl -fsS --proto '=https' --max-redirs 0 https://raw.githubusercontent.com/alexbertho/mysyncfiles-client/main/deploy/install.sh | sh
 ```
 
-L’installateur demande l’URL HTTPS, le dossier local et la clé publique du serveur, puis affiche un code. Sur le serveur, l'administrateur lance :
+L’installateur demande l’URL HTTPS, le dossier local et le Server ID (la clé publique du serveur). Sur le serveur, l'administrateur peut consulter cette clé sans ouvrir d'appairage :
+
+```sh
+make get
+```
+
+Transmettre le Server ID directement au client par un canal fiable. `make get` affiche aussi le nom, l'origine publique, les appareils approuvés, les invitations en attente et le stockage. Le client affiche ensuite son code ; sur le serveur, lancer :
 
 ```sh
 make pair
 ```
 
-Cette commande affiche la clé publique à transmettre directement au client par un canal fiable. Le client l'enregistre pour vérifier les réponses du serveur, même derrière un proxy TLS. Pour un profil existant, suivre la [migration de la clé serveur](docs/device-auth.md#authenticite-des-reponses-et-migration).
+Si `make pair` est déjà ouvert pour lire la clé, saisir le code dans ce terminal et le garder ouvert jusqu'à l'approbation. La même demande se reprend avec le même nom et le même code. Un autre code pour un nom réservé propose de remplacer l'invitation en attente après confirmation ; un appareil approuvé exige un autre nom ou la reprise de son profil existant. Le client conserve la clé pour vérifier les réponses du serveur, même derrière un proxy TLS. Pour un profil existant, suivre la [migration de la clé serveur](docs/device-auth.md#authenticite-des-reponses-et-migration).
 
 Après comparaison de l'empreinte TPM, le client effectue une première synchronisation et démarre le service s'il n'y a pas de conflit. Le [guide client](docs/install-client.md) couvre la reprise, le cas du certificat EK externe et le parcours manuel. Une première exécution du script suppose que l'origine HTTPS sert le bon script ; la signature protège le binaire téléchargé, pas un script distant compromis.
 

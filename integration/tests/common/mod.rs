@@ -54,7 +54,11 @@ impl Simulator {
             .arg("--ctrl")
             .arg(format!("type=tcp,bindaddr=127.0.0.1,port={}", port + 1))
             .arg("--server")
-            .arg(format!("type=tcp,bindaddr=127.0.0.1,port={port}"))
+            // TCTI uses one connection per command; inherited sockets in other
+            // test children must not keep an idle connection alive here.
+            .arg(format!(
+                "type=tcp,bindaddr=127.0.0.1,port={port},disconnect"
+            ))
             .args(["--flags", "not-need-init,startup-clear"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())

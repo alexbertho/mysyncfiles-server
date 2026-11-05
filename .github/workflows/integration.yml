@@ -1,6 +1,14 @@
 name: TPM integration
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/device_auth.rs'
+      - 'src/bin/mysync-server.rs'
+      - 'src/server/info.rs'
+      - 'tests/pairing_flow.rs'
+      - 'integration/**'
+      - '.github/workflows/integration.yml'
   push:
     tags: ['v*']
   schedule:
@@ -27,7 +35,7 @@ jobs:
           ref: ${{ steps.client.outputs.revision }}
           path: mysyncfiles-client
           persist-credentials: false
-      - run: rustup toolchain install 1.98.1 --profile minimal
+      - run: rustup toolchain install 1.98.1 --profile minimal --component rustfmt
       - run: sudo apt-get update && sudo apt-get install -y libtss2-dev libssl-dev pkg-config swtpm swtpm-tools tpm2-tools
       - run: make test-integration
       - name: Verify Debian 13 and Arch TPM runtimes

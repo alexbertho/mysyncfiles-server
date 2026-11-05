@@ -55,7 +55,11 @@ impl Simulator {
             .arg("--ctrl")
             .arg(format!("type=tcp,bindaddr=127.0.0.1,port={}", port + 1))
             .arg("--server")
-            .arg(format!("type=tcp,bindaddr=127.0.0.1,port={port}"))
+            // TCTI opens one connection per command. Close the server end too,
+            // so a socket inherited by another test's child cannot stall it.
+            .arg(format!(
+                "type=tcp,bindaddr=127.0.0.1,port={port},disconnect"
+            ))
             .args(["--flags", "not-need-init,startup-clear"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -526,6 +530,74 @@ async fn pairing_code_requires_local_registration_and_tpm_approval() -> Result<(
             .await?
             .status(),
         StatusCode::GONE
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn replacing_a_pending_pair_requires_a_new_tpm_proof_and_approval() -> Result<()> {
+    let ca = Certificate::ca()?;
+    let simulator = Simulator::start()?;
+    let cert = simulator.certify_ek(&ca, "rsa")?;
+    let server = Server::start(&ca).await?;
+    let http = Client::new();
+    let (mut key, _) = Identity::create(&simulator.tcti, "rsa")?;
+    let old_code = device_auth::pairing_code()?;
+    let old_id = device_auth::register_pair(&server.state, "laptop", &old_code)?;
+    let fingerprint = enroll(
+        &http,
+        &server,
+        &device_auth::normalize_pairing_code(&old_code)?,
+        &mut key,
+        &cert,
+    )
+    .await?;
+    let new_code = device_auth::pairing_code()?;
+    let new_id = device_auth::replace_pending_pair(&server.state, "laptop", &new_code, &old_id)?;
+    assert!(device_auth::approve(&server.state, &old_id, &fingerprint).is_err());
+    assert!(device_auth::approve(&server.state, &new_id, &fingerprint).is_err());
+    assert_eq!(
+        http.post(format!("{}/v1/enroll/ready", server.url))
+            .json(&serde_json::json!({"code": old_code}))
+            .send()
+            .await?
+            .status(),
+        StatusCode::GONE
+    );
+    assert_eq!(
+        http.post(format!("{}/v1/enroll/ready", server.url))
+            .json(&serde_json::json!({"code": new_code}))
+            .send()
+            .await?
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert!(
+        start_enroll(
+            &http,
+            &server,
+            &device_auth::normalize_pairing_code(&old_code)?,
+            &key,
+            &cert
+        )
+        .await?
+        .status()
+        .is_client_error()
+    );
+    let fingerprint = enroll(
+        &http,
+        &server,
+        &device_auth::normalize_pairing_code(&new_code)?,
+        &mut key,
+        &cert,
+    )
+    .await?;
+    assert!(session(&http, &server, &key).await.is_err());
+    device_auth::approve(&server.state, &new_id, &fingerprint)?;
+    session(&http, &server, &key).await?;
+    assert_eq!(
+        server::instance_info(server._dir.path().join("data"))?.approved_devices,
+        1
     );
     Ok(())
 }
