@@ -24,6 +24,10 @@ import urllib.request
 import zipfile
 
 
+class DeploymentBusy(RuntimeError):
+    """Existing transfers must finish before a later timer attempt."""
+
+
 def run(*args, timeout=30, **kwargs):
     return subprocess.run(args, check=True, timeout=timeout, **kwargs)
 
@@ -133,6 +137,8 @@ class Deployment:
             with client.makefile("rb") as stream:
                 result = json.loads(stream.readline(4096))
             if not result["ok"]:
+                if action == "pause" and result.get("error") == "TimeoutError":
+                    raise DeploymentBusy("active transfers are still draining")
                 raise RuntimeError(f"gateway {action} failed: {result.get('error')}")
             return result
 
@@ -380,6 +386,13 @@ class Deployment:
             self.check_public(manifest)
             self.status(revision, "success", "Deployed; HTTPS, identity, data and web assets verified", ci["id"])
             failed_path.unlink(missing_ok=True)
+        except DeploymentBusy:
+            # switch() has already resumed the old version. Normal long-running
+            # transfers are not a defective release and must not quarantine it.
+            run("docker", "rm", candidate["container"], stdout=subprocess.DEVNULL)
+            self.status(revision, "pending", "Waiting for active transfers; retrying automatically", ci["id"])
+            print("active transfers preserved; retrying at the next timer tick", flush=True)
+            return
         except BaseException:
             write_json(failed_path, attempt)
             # After traffic was released, rollback uses today's live data, never

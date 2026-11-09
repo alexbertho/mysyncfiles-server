@@ -68,7 +68,7 @@ CI/CD conserve ce verrou : une passerelle TCP permanente laisse finir les
 requêtes actives, puis retient les nouvelles connexions pendant une courte
 bascule. Les corps et signatures sont transmis sans modification ni rejeu.
 Si une connexion active ne termine pas en dix secondes, la mise à jour est
-abandonnée et le trafic reprend sur l'ancienne version. Les transferts actifs
+reportée au prochain passage du timer et le trafic reprend sur l'ancienne version. Les transferts actifs
 ne sont pas interrompus pour forcer un déploiement.
 
 Avant la bascule, l'image est démarrée sur des données temporaires et ses pages,

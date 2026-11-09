@@ -292,6 +292,26 @@ class DeploymentTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unsafe"):
                 self.deployment.unpack(archive, self.root / "unpacked")
 
+    def test_busy_transfers_are_retried_automatically_without_quarantining_ci(self):
+        (self.state / "activated").touch()
+        revision = self.new["revision"]
+        ci = dict(id=123, run_number=1, run_attempt=1, head_sha=revision,
+                  head_branch="main", event="push", head_repository=dict(full_name="example/server"),
+                  path=".github/workflows/ci.yml", status="completed", conclusion="success")
+        with contextlib.ExitStack() as stack:
+            for name, value in (("head", revision), ("gh", dict(workflow_runs=[ci])),
+                                ("artifact", dict(image_id="fixture-image"))):
+                stack.enter_context(mock.patch.object(self.deployment, name, return_value=value))
+            for name in ("recover", "unpack", "initialize_fixture", "create"):
+                stack.enter_context(mock.patch.object(self.deployment, name))
+            stack.enter_context(mock.patch.object(self.deployment, "switch", side_effect=deploy.DeploymentBusy()))
+            stack.enter_context(mock.patch.object(deploy, "run"))
+            status = stack.enter_context(mock.patch.object(self.deployment, "status"))
+            self.deployment.poll()
+            self.assertEqual(status.call_args.args[1], "pending")
+        self.assertFalse((self.state / "failed.json").exists())
+        self.assertEqual(self.deployment.current(), self.old)
+
 
 if __name__ == "__main__":
     unittest.main()
