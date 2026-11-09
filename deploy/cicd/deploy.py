@@ -61,6 +61,44 @@ def sha256(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+def image_identities(path, tag):
+    """Bind classic config IDs and containerd manifest IDs to the same image."""
+    with tarfile.open(path) as archive:
+        def document(name):
+            member = archive.getmember(name)
+            if not member.isfile() or member.size > 1024 * 1024:
+                raise ValueError("invalid image metadata")
+            with archive.extractfile(member) as source:
+                return source.read()
+
+        manifests = json.loads(document("manifest.json"))
+        selected = [item for item in manifests if tag in item.get("RepoTags", [])]
+        if len(selected) != 1:
+            raise ValueError("expected exactly one image with the release tag")
+        config_id = "sha256:" + hashlib.sha256(document(selected[0]["Config"])).hexdigest()
+        identities = {config_id}
+
+        def visit(descriptor, depth=0):
+            digest = descriptor["digest"]
+            if depth > 8 or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                raise ValueError("invalid image descriptor")
+            content = document("blobs/sha256/" + digest.removeprefix("sha256:"))
+            if "sha256:" + hashlib.sha256(content).hexdigest() != digest:
+                raise ValueError("image descriptor checksum mismatch")
+            node = json.loads(content)
+            matched = node.get("config", {}).get("digest") == config_id
+            for child in node.get("manifests", []):
+                matched = visit(child, depth + 1) or matched
+            if matched:
+                identities.add(digest)
+            return matched
+
+        if "index.json" in archive.getnames():
+            for descriptor in json.loads(document("index.json"))["manifests"]:
+                visit(descriptor)
+        return identities
+
+
 def request(url, timeout=3):
     query = urllib.request.Request(url, headers={"User-Agent": "MySyncFiles-Deployment/1"})
     # Deployment checks must never silently succeed on another origin.
@@ -328,10 +366,16 @@ class Deployment:
         for name, expected in manifest["files"].items():
             if sha256(destination / name) != expected:
                 raise RuntimeError("artifact file checksum mismatch")
+        identities = image_identities(destination / "image.tar", manifest["image_tag"])
+        if manifest["image_id"] not in identities:
+            raise RuntimeError("CI image identity is absent from the verified archive")
         run("docker", "load", "--input", str(destination / "image.tar"), timeout=60, stdout=subprocess.DEVNULL)
         image = json.loads(output("docker", "image", "inspect", manifest["image_tag"]))[0]
-        if image["Id"] != manifest["image_id"] or image["Config"]["Labels"].get("org.opencontainers.image.revision") != revision:
+        if image["Id"] not in identities or image["Config"]["Labels"].get("org.opencontainers.image.revision") != revision:
             raise RuntimeError("immutable image identity mismatch")
+        # Docker's classic store reports the config ID; the containerd store
+        # reports the OCI manifest/index ID. Use the verified local ID to run it.
+        manifest["image_id"] = image["Id"]
         return manifest
 
     def poll(self):

@@ -313,5 +313,46 @@ class DeploymentTest(unittest.TestCase):
         self.assertEqual(self.deployment.current(), self.old)
 
 
+class ImageIdentityTest(unittest.TestCase):
+    def archive(self, directory, *, oci=True, corrupt=False):
+        config = json.dumps(dict(architecture="amd64", config={}, rootfs={})).encode()
+        config_id = "sha256:" + hashlib.sha256(config).hexdigest()
+        image = json.dumps(dict(schemaVersion=2, config=dict(digest=config_id), layers=[])).encode()
+        manifest_id = "sha256:" + hashlib.sha256(image).hexdigest()
+        config_path = "blobs/sha256/" + config_id.removeprefix("sha256:") if oci else config_id.removeprefix("sha256:") + ".json"
+        files = {
+            config_path: config,
+            "manifest.json": json.dumps([dict(Config=config_path, RepoTags=["fixture:release"], Layers=[])]).encode(),
+        }
+        if oci:
+            files["blobs/sha256/" + manifest_id.removeprefix("sha256:")] = image + (b" " if corrupt else b"")
+            files["index.json"] = json.dumps(dict(manifests=[dict(digest=manifest_id)])).encode()
+        path = directory / "image.tar"
+        with tarfile.open(path, "w") as archive:
+            for name, content in files.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(content)
+                archive.addfile(member, io.BytesIO(content))
+        return path, config_id, manifest_id
+
+    def test_classic_and_containerd_ids_bind_to_identical_configuration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path, config_id, manifest_id = self.archive(Path(temporary))
+            self.assertEqual(deploy.image_identities(path, "fixture:release"), {config_id, manifest_id})
+
+    def test_legacy_docker_archive_uses_its_configuration_digest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path, config_id, _manifest_id = self.archive(Path(temporary), oci=False)
+            self.assertEqual(deploy.image_identities(path, "fixture:release"), {config_id})
+
+    def test_corrupt_oci_descriptor_and_wrong_tag_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path, _config_id, _manifest_id = self.archive(Path(temporary), corrupt=True)
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                deploy.image_identities(path, "fixture:release")
+            with self.assertRaisesRegex(ValueError, "release tag"):
+                deploy.image_identities(path, "different:release")
+
+
 if __name__ == "__main__":
     unittest.main()
