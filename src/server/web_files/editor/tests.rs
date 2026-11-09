@@ -274,8 +274,11 @@ async fn runner_tickets_bind_content_instance_device_session_expiry_and_single_u
     assert!(exchange(&f, &token, &"a".repeat(64)).await.is_err());
     let token = checked(runner_ticket(&f, &h, Operation::Tools).await)?;
     f.grant(&h, "files.read").await?;
-    assert!(exchange(&f, &token, &"a".repeat(64)).await.is_err());
     f.grant(&h, "code.run").await?;
+    assert_eq!(
+        checked(exchange(&f, &token, &"a".repeat(64)).await)?.owner,
+        a.owner
+    );
     let token = checked(runner_ticket(&f, &h, Operation::Tools).await)?;
     f.state
         .db

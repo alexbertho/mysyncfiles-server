@@ -62,6 +62,8 @@ async function run(type,name) {
   async function setup(options={}) {
     const context=await browser.newContext({viewport:options.viewport || (options.mobile?{width:390,height:844}:{width:1240,height:823}), acceptDownloads:true, timezoneId:"Europe/Paris"});
     const page=await context.newPage();
+    if(options.manual)await page.addInitScript(()=>localStorage.setItem("mysync-auto-access","off"));
+    if(options.clock)await page.clock.install();
     const errors=[]; const violations=[];
     let navigations=0;
     page.on("framenavigated",frame=>{if(frame===page.mainFrame())navigations++;});
@@ -69,8 +71,13 @@ async function run(type,name) {
     const releaseListings=()=>pendingListings.splice(0).forEach(resolve=>resolve());
     page.on("pageerror", e=>errors.push(e.message));
     page.on("console", msg=>{if(msg.type()==="error" && /Content Security Policy|Refused to|violates/.test(msg.text()))violations.push(msg.text());});
-    let authorized=options.authorized!==false, entries=options.entries || fixtures, expires=Math.floor(Date.now()/1000)+1800;
-    let mode=options.mode || "normal", calls=0, chunks=0, loggedOut=false, pdfs=0;
+    let clockOffset=0;
+    const now=()=>Math.floor((Date.now()+clockOffset)/1000);
+    let authorized=options.authorized!==false, entries=options.entries || fixtures, expires=now()+1800;
+    let writeExpires=expires, manageExpires=expires;
+    const proofs=[];
+    const completed=new Set();
+    let mode=options.mode || "normal", calls=0, chunks=0, loggedOut=false, pdfs=0, sessionReads=0;
     let writeAuthorized=false, uploadChunks=0;
     let manageAuthorized=false;
     const mutations=[];
@@ -80,29 +87,30 @@ async function run(type,name) {
     await context.route("http://127.0.0.1:47831/**",async route=>{
       const headers={"Access-Control-Allow-Origin":origin,"Access-Control-Allow-Headers":"X-MySync-Bridge, X-MySync-Challenge","Access-Control-Allow-Private-Network":"true"};
       if(route.request().method()==="OPTIONS") {await route.fulfill({status:204,headers});return;}
-      if(mode==="denied") {await route.abort();return;}
+      if(mode==="denied" || mode==="offline") {await route.abort();return;}
       if(mode==="waiting") {await new Promise(resolve=>setTimeout(resolve,4500));await route.fulfill({status:401,headers,json:{error:"challenge_required"}}).catch(()=>{});return;}
       if(!route.request().headers()["x-mysync-challenge"]) {await route.fulfill({status:401,headers,json:{error:"challenge_required"}});return;}
+      proofs.push(route.request().headers()["x-mysync-challenge"]);
       if(route.request().headers()["x-mysync-challenge"]==="upload-ticket") {
         if(mode==="write_disabled") {await route.fulfill({status:403,headers,json:{error:"files_write_disabled"}});return;}
         if(mode==="write_impostor") {await route.fulfill({headers,json:{challenge_id:id}});return;}
-        writeAuthorized=true;
+        writeAuthorized=true;writeExpires=expires;completed.add("upload-ticket");
         if(mode==="write_lost_ack") {await route.abort();return;}
         await route.fulfill({headers,json:{}});return;
       }
       if(route.request().headers()["x-mysync-challenge"]==="manage-ticket") {
         if(mode==="manage_disabled") {await route.fulfill({status:403,headers,json:{error:"files_manage_disabled"}});return;}
         if(mode==="manage_impostor") {await route.fulfill({headers,json:{}});return;}
-        manageAuthorized=true;
+        manageAuthorized=true;manageExpires=expires;completed.add("manage-ticket");
         if(mode==="manage_lost_ack") {await route.abort();return;}
         await route.fulfill({headers,json:{}});return;
       }
       if(mode==="disabled") {await route.fulfill({status:403,headers,json:{error:"files_read_disabled"}});return;}
       if(mode==="rejected" || mode==="misleading_rejection") {
-        if(mode==="misleading_rejection")authorized=true;
+        if(mode==="misleading_rejection") {authorized=true;completed.add("fixture-ticket");}
         await route.fulfill({status:403,headers,json:{error:"invalid_challenge"}});return;
       }
-      if(mode!=="impostor")authorized=true;
+      if(mode!=="impostor") {authorized=true;expires=now()+1800;completed.add("fixture-ticket");}
       if(mode==="lost_ack") {await route.abort();return;}
       await route.fulfill({headers,json:{device_name:"Local impostor",challenge_id:"wrong"}});
     });
@@ -125,14 +133,20 @@ async function run(type,name) {
         await route.fulfill({contentType:"application/pdf",headers:{"Content-Disposition":"inline","Content-Security-Policy":pdfCsp,"Cache-Control":"no-store"},body:pdfContent});return;
       }
       assert.equal(route.request().headers()["x-mysync-web"],"1");
-      const fileSession={device_name:"Approved fixture",expires_at:expires,download_limit:268435456,chunk_bytes:8388608,...(!options.oldServer?{upload_limit:268435456,manage_limit:10000}:{})};
+      if(url.pathname==="/v1/web/files/session" && route.request().method()==="GET")sessionReads++;
+      const deadlines=[expires];
+      if(writeAuthorized && writeExpires>now())deadlines.push(writeExpires);
+      if(manageAuthorized && manageExpires>now())deadlines.push(manageExpires);
+      const fileSession={device_name:"Approved fixture",expires_at:expires,renew_at:Math.min(...deadlines)-300,download_limit:268435456,chunk_bytes:8388608,...(!options.oldServer?{upload_limit:268435456,manage_limit:10000}:{})};
+      if(/^\/v1\/web\/editor\/(edit|run)\/session$/.test(url.pathname)) {await route.fulfill({status:403,json:{error:url.pathname.includes("/edit/")?"files_edit_required":"code_run_required"}});return;}
       if(url.pathname.includes("/manage/")) {
-        if(!authorized || expires*1000<=Date.now()) {await route.fulfill({status:401,json:{error:"session_expired"}});return;}
-        if(url.pathname.endsWith("/challenges")) {await route.fulfill({json:{challenge_id:id,ticket:"manage-ticket"}});return;}
+        if(!authorized || expires<=now()) {await route.fulfill({status:401,json:{error:"session_expired"}});return;}
+        if(url.pathname.endsWith("/challenges")) {completed.delete("manage-ticket");await route.fulfill({json:{challenge_id:id,ticket:"manage-ticket"}});return;}
+        if(url.pathname.includes("/challenges/") && !completed.has("manage-ticket")) {await route.fulfill({status:202,json:{error:"pending"}});return;}
         await route.fulfill(manageAuthorized?{json:fileSession}:url.pathname.endsWith("/session")?{status:403,json:{error:"files_manage_required"}}:{status:202,json:{error:"pending"}});return;
       }
       if(url.pathname.startsWith("/v1/web/files/directories")) {
-        if(!authorized || expires*1000<=Date.now()) {await route.fulfill({status:401,json:{error:"session_expired"}});return;}
+        if(!authorized || expires<=now()) {await route.fulfill({status:401,json:{error:"session_expired"}});return;}
         const input=route.request().method()==="GET"?{path:url.searchParams.get("path")}:route.request().postDataJSON();
         const children=entries.filter(entry=>entry.path.startsWith(input.path+"/"));
         if(!children.length) {await route.fulfill({status:404,json:{error:"directory_not_found"}});return;}
@@ -151,12 +165,13 @@ async function run(type,name) {
         await route.fulfill({json:{path:target,file_count:children.length}});return;
       }
       if(url.pathname.includes("/write/")) {
-        if(!authorized || expires*1000<=Date.now()) {await route.fulfill({status:401,json:{error:"session_expired"}});return;}
-        if(url.pathname.endsWith("/challenges")) {await route.fulfill({json:{challenge_id:id,ticket:"upload-ticket"}});return;}
+        if(!authorized || expires<=now()) {await route.fulfill({status:401,json:{error:"session_expired"}});return;}
+        if(url.pathname.endsWith("/challenges")) {completed.delete("upload-ticket");await route.fulfill({json:{challenge_id:id,ticket:"upload-ticket"}});return;}
+        if(url.pathname.includes("/challenges/") && !completed.has("upload-ticket")) {await route.fulfill({status:202,json:{error:"pending"}});return;}
         await route.fulfill(writeAuthorized?{json:fileSession}:url.pathname.endsWith("/session")?{status:403,json:{error:"files_write_required"}}:{status:202,json:{error:"pending"}});return;
       }
       if(url.pathname.startsWith("/v1/web/files/uploads")) {
-        if(!authorized || expires*1000<=Date.now()) {await route.fulfill({status:401,json:{error:"session_expired"}});return;}
+        if(!authorized || expires<=now()) {await route.fulfill({status:401,json:{error:"session_expired"}});return;}
         assert.equal(writeAuthorized,true,"write authority precedes any upload");
         const method=route.request().method(), uploadId=url.pathname.split("/")[5];
         if(method==="POST" && !uploadId) {
@@ -189,9 +204,9 @@ async function run(type,name) {
       }
       if(url.pathname.endsWith("/logout")) {authorized=false;loggedOut=true;await route.fulfill({json:{}});return;}
       if(url.pathname.endsWith("/session") && route.request().method()==="POST") {loggedOut=false;await route.fulfill({json:{}});return;}
-      if(url.pathname.endsWith("/challenges")) {await route.fulfill({json:{challenge_id:id,ticket:"fixture-ticket",expires_at:Math.floor(Date.now()/1000)+60}});return;}
-      if(url.pathname.endsWith(`/challenges/${id}`) && !authorized) {await route.fulfill({status:202,json:{error:"pending"}});return;}
-      if(!authorized || expires*1000<=Date.now()) {await route.fulfill({status:401,json:{error:"session_expired"}});return;}
+      if(url.pathname.endsWith("/challenges")) {completed.delete("fixture-ticket");await route.fulfill({json:{challenge_id:id,ticket:"fixture-ticket",expires_at:now()+60}});return;}
+      if(url.pathname.endsWith(`/challenges/${id}`) && !completed.has("fixture-ticket")) {await route.fulfill({status:202,json:{error:"pending"}});return;}
+      if(!authorized || expires<=now()) {await route.fulfill({status:401,json:{error:"session_expired"}});return;}
       if(url.pathname.endsWith("/session") || url.pathname.endsWith(`/challenges/${id}`)) {await route.fulfill({json:fileSession});return;}
       if(url.pathname.endsWith("/entries")) {
         calls++;
@@ -238,7 +253,7 @@ async function run(type,name) {
       releaseListings();releaseUploads();
       await context.close();console.log(`  ${++counter}. ${label}: passed`);
     }
-    return {page,context,capture,matrix,finish,releaseListings,releaseUploads,uploaded,cancelled,mutations,uploadChunks:()=>uploadChunks,setMode:v=>mode=v,setEntries:v=>entries=v,setAuthorized:v=>authorized=v,setExpiry:v=>expires=v,calls:()=>calls,chunks:()=>chunks,pdfs:()=>pdfs,loggedOut:()=>loggedOut,navigations:()=>navigations};
+    return {proofs,sessionReads:()=>sessionReads,advance:async ms=>{clockOffset+=ms;await page.clock.fastForward(ms);},page,context,capture,matrix,finish,releaseListings,releaseUploads,uploaded,cancelled,mutations,uploadChunks:()=>uploadChunks,setMode:v=>mode=v,setEntries:v=>entries=v,setAuthorized:v=>authorized=v,setExpiry:v=>expires=v,calls:()=>calls,chunks:()=>chunks,pdfs:()=>pdfs,loggedOut:()=>loggedOut,navigations:()=>navigations};
   }
   async function choose(page, files) {
     const [chooser]=await Promise.all([page.waitForEvent("filechooser"),page.locator("#upload-add").click()]);
@@ -374,7 +389,7 @@ async function run(type,name) {
       await page.waitForFunction(()=>document.querySelector("#upload-message").textContent.startsWith("Envoi ·"));
       if(action==="cancel")await page.locator("#upload-cancel").click();
       if(action==="logout")await page.locator("#logout").click();
-      if(action==="expire")await page.clock.fastForward(3000);
+      if(action==="expire") {t.setMode("offline");await page.clock.fastForward(3000);}
       if(action==="navigate")await page.getByRole("button",{name:"Projets",exact:true}).dblclick();
       t.releaseUploads();
       if(["logout","expire"].includes(action)) {
@@ -478,7 +493,7 @@ async function run(type,name) {
       await t.finish("navigation, themes, menus, details, folder, search, logout");
     }
     for(const mode of ["normal","lost_ack","impostor","disabled","rejected","misleading_rejection","denied","waiting"]) {
-      const t=await setup({authorized:false,mode});const {page}=t;
+      const t=await setup({authorized:false,mode,manual:true});const {page}=t;
       assert.equal(t.calls(),0);await t.capture(mode==="normal"?"05-verification":"access-"+mode);
       if(mode==="normal")await t.matrix("verification");
       await page.locator("#file-verify").click();
@@ -488,6 +503,87 @@ async function run(type,name) {
       if(mode==="denied")await t.capture("10-permission-refusee");
       if(mode==="denied" || mode==="disabled")await t.matrix(mode);
       await t.finish(`verification ${mode}`);
+    }
+    for (const mode of ["normal", "lost_ack", "impostor", "disabled", "rejected", "denied"]) {
+      const t=await setup({authorized:false,mode});const {page}=t;
+      if (["normal","lost_ack"].includes(mode)) {
+        await page.locator("#rows tr").first().waitFor();
+        assert.equal(t.calls(),1,"opening Atlas authorizes without a click");
+        assert.equal(await page.locator("#session-time").textContent(),"Accès automatique");
+        await page.locator("#logout").click();
+        await page.waitForFunction(()=>document.querySelector("#access-message").textContent==="Vous êtes déconnecté.");
+        const proofs=t.proofs.length;
+        await page.reload();
+        assert.equal(await page.locator("#rows tr").count(),0);
+        assert.equal(t.proofs.length,proofs,"logout prevents automatic reconnect after reload");
+        await page.locator("#file-verify").click();
+        await page.locator("#rows tr").first().waitFor();
+      } else {
+        await page.waitForFunction(()=>!document.querySelector("#file-verify").disabled && document.querySelector("#access-message").textContent!=="Vérification en cours…");
+        assert.equal(t.calls(),0);
+        assert.equal(await page.locator("#rows tr").count(),0);
+      }
+      await t.finish(`automatic access ${mode}`);
+    }
+    {
+      const t=await setup({clock:true});const {page}=t;
+      await choose(page,{name:"before-renewal.txt",mimeType:"text/plain",buffer:Buffer.from("before")});
+      await page.waitForFunction(()=>document.querySelector("#upload-message").textContent.includes("1 fichier envoyé"));
+      const initialProofs=t.proofs.length;
+      // Several deadlines, including the original cookie's 35-minute lifetime.
+      for(let cycle=1;cycle<=3;cycle++) {
+        const done=page.waitForResponse(r=>r.url().includes("/write/challenges/") && r.status()===200);
+        await t.advance(25*60*1000);await done;
+        await page.waitForResponse(r=>r.url().endsWith("/files/session") && r.request().method()==="GET");
+        assert.equal(t.proofs.length,initialProofs+cycle*2,"read and write each renew with their own proof");
+        assert.equal(await page.locator("#explorer").isVisible(),true);
+        assert.equal(t.calls(),2,"renewal preserves the current view");
+      }
+      await t.advance(25*60*1000-5000);
+      t.setMode("upload_wait");
+      await choose(page,{name:"across-renewal.txt",mimeType:"text/plain",buffer:Buffer.from("across")});
+      await page.waitForFunction(()=>document.querySelector("#upload-message").textContent.startsWith("Envoi ·"));
+      const renewed=page.waitForResponse(r=>r.url().includes("/write/challenges/") && r.status()===200);
+      await t.advance(5000);await renewed;
+      t.releaseUploads();
+      await page.waitForFunction(()=>document.querySelector("#upload-message").textContent.includes("1 fichier envoyé"));
+      assert.equal(t.uploaded.length,2);
+      await t.finish("renewals beyond 30 minutes preserve view, scopes and in-flight uploads");
+    }
+    {
+      const t=await setup({clock:true});const {page}=t;
+      t.setMode("offline");
+      const failed=page.waitForResponse(r=>r.url().includes("/files/challenges/") && r.status()===202);
+      // The mock retains the last valid lease, like the real server. A local
+      // failure cannot extend it; the hard deadline still hides private data.
+      await t.advance(25*60*1000);await failed;
+      await t.advance(5*60*1000+1000);
+      await page.waitForFunction(()=>document.querySelector("#access-title").textContent==="Session expirée");
+      assert.equal(await page.locator("#rows tr").count(),0);
+      t.setMode("normal");
+      await page.evaluate(()=>document.dispatchEvent(new Event("visibilitychange")));
+      await page.locator("#rows tr").first().waitFor();
+      await t.finish("stopped client cannot extend access; returning to the tab reconnects automatically");
+    }
+    {
+      const t=await setup({clock:true});
+      const other=await t.context.newPage();
+      await other.goto(`${origin}/files`);
+      await other.locator("#rows tr").first().waitFor();
+      const before=t.sessionReads();
+      await t.advance(25*60*1000); // Playwright's clock is shared by the context.
+      // Both tabs must finish: one checks, proves and rereads; the other
+      // observes the renewed session under the same browser lock.
+      const deadline=Date.now()+10000;
+      while(t.sessionReads()<before+3 && Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));
+      assert.ok(t.sessionReads()>=before+3);
+      assert.deepEqual(t.proofs,["fixture-ticket"],"tabs share one renewal");
+      await t.page.locator("#logout").click();
+      await other.locator("#access").waitFor();
+      assert.equal(await other.locator("#rows tr").count(),0);
+      await other.reload();
+      assert.equal(await other.locator("#rows tr").count(),0);
+      await t.finish("simultaneous tabs share renewal and respect logout");
     }
     {
       const long="rapport-"+"documentation-".repeat(13)+"final.pdf";
@@ -548,7 +644,7 @@ async function run(type,name) {
       assert.equal(t.navigations(),1,"the Files link must not reload the document");
       await page.getByRole("button",{name:"README.md",exact:true}).click();
       await page.evaluate(()=>{window.savedRow=document.querySelector("#rows tr");});
-      t.setMode("held");await page.locator("#refresh").click();
+      t.setMode("held");await page.locator("#refresh").click();t.setMode("offline");
       await page.locator("#refresh.is-loading").waitFor();
       assert.equal(await page.locator("#details").isVisible(),true);
       t.setMode("normal");t.releaseListings();

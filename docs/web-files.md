@@ -19,7 +19,9 @@ mysync web-files enable
 
 Si le daemon verrouille le profil, l’arrêter avant de changer ce réglage. Relancer ensuite le daemon ou le service utilisateur déjà installé et activé. Le pont local doit aussi être actif (`mysync web-status status`, puis `mysync web-status enable` si nécessaire).
 
-Dans Atlas, cliquer sur **Vérifier cet appareil** et accepter l’accès local demandé par le navigateur. La page ouvre une session de lecture de **30 minutes** lorsque le serveur confirme la preuve TPM et le scope `files.read`. L’autorisation `status.read` ne suffit pas. Les conditions et limites du [pont loopback](web-status.md#acces-local-et-erreurs) restent applicables.
+Atlas reconnaît automatiquement le client à l’ouverture. Accepter l’accès local si le navigateur le demande ; le bouton **Vérifier cet appareil** permet de réessayer si nécessaire. Le serveur confirme la preuve TPM et le scope `files.read`, puis la page renouvelle l’accès en arrière-plan : **aucune vérification manuelle toutes les 30 minutes**. Garder le client lancé et la lecture web autorisée. L’autorisation `status.read` ne suffit pas. Les conditions et limites du [pont loopback](web-status.md#acces-local-et-erreurs) restent applicables.
+
+Cette fonction nécessite la mise à jour du serveur et de ses fichiers web. Elle réutilise le protocole des clients existants qui prennent en charge les scopes concernés ; aucune nouvelle commande de configuration cliente n’est nécessaire. Une permission d’accès local peut encore être demandée par le navigateur, notamment lors du premier accès.
 
 Tous les appareils approuvés consultent le **même espace global de fichiers**. L’approbation ne crée ni compte utilisateur ni dossier privé par appareil. Le client local autorise l’origine configurée ; cette autorisation ne distingue pas les utilisateurs Linux ou les navigateurs exécutés sur ce PC.
 
@@ -61,7 +63,7 @@ Relancer ensuite le client ou son service déjà installé. `status` affiche les
 
 Ouvrir le dossier de destination puis déposer les fichiers sur sa liste, ou utiliser **Ajouter des fichiers**, également accessible au clavier et sur téléphone. La zone bleue affiche le chemin de destination ; **Échap** annule le dépôt avant son relâchement. Les résultats de recherche et la navigation en cours n’acceptent pas de dépôt. Un dépôt sur le menu ou hors de la liste n’ajoute rien et n’ouvre pas le fichier dans le navigateur.
 
-Au premier envoi, une preuve TPM distincte `files.write` est demandée au client local et confirmée par le serveur. L’autorisation reste liée au même appareil, au même appairage et à la même session que la lecture. Elle ne prolonge pas la session de 30 minutes.
+Au premier envoi, une preuve TPM distincte `files.write` est demandée au client local et confirmée par le serveur. L’autorisation reste liée au même appareil, au même appairage et à la même session que la lecture. Son renouvellement automatique exige sa propre preuve `files.write` ; une preuve de lecture seule ne le prolonge pas. Les transferts déjà commencés conservent leur autorisation lors d’un renouvellement réussi.
 
 La sélection accepte jusqu’à **50 fichiers**, de **256 Mio maximum chacun**. Les dossiers ne sont pas pris en charge. Les fichiers sont traités successivement : calcul SHA-256, transfert par blocs d’au plus **8 Mio**, vérification serveur et publication. Le contenu n’apparaît dans la liste qu’après publication. L’indication **Envoyé** exige une confirmation du serveur ; une confirmation perdue invite à actualiser avant de réessayer. Les appareils Linux synchroniseront les fichiers ajoutés lors de leur prochain passage.
 
@@ -99,7 +101,11 @@ jour des seuls fichiers web ne suffit pas.
 
 ## Expiration et révocation
 
-**Déconnexion** supprime la session sur le serveur, ses challenges et ses autorisations de lecture, d’envoi et de gestion des dossiers. Les autres onglets ouverts sur la même origine effacent aussi leur affichage lorsqu’ils reçoivent cette déconnexion. Après 30 minutes, une nouvelle vérification explicite est nécessaire ; consulter un dossier ne prolonge pas la session.
+**Déconnexion** supprime la session sur le serveur, ses challenges et ses autorisations de lecture, d’envoi et de gestion des dossiers. Les autres onglets ouverts sur la même origine effacent aussi leur affichage lorsqu’ils reçoivent cette déconnexion. Une préférence locale empêche la reconnexion automatique, y compris après rechargement ; cliquer sur **Vérifier cet appareil** pour la réactiver. Cette préférence ne contient ni jeton ni données de fichiers. Annuler une vérification suspend également la reconnexion automatique.
+
+L’accès ne présente plus de coupure périodique : cinq minutes avant la première échéance, Atlas refait les preuves locales nécessaires sans effacer la liste ni interrompre les transferts autorisés. Les onglets coordonnent ce renouvellement lorsque le navigateur prend en charge Web Locks. Consulter un dossier ne prolonge aucun droit à lui seul. Au retour d’un onglet après une veille, une autorisation expirée est revérifiée automatiquement.
+
+Si le client est arrêté, si un consentement local est retiré ou si le réseau est indisponible, les droits concernés cessent de se renouveler. L’autorisation déjà accordée reste utilisable jusqu’à son échéance, **au maximum 30 minutes après sa dernière preuve** : l’arrêt du client ne constitue pas une révocation instantanée. Le navigateur masque les fichiers à cette échéance. Déconnexion et révocation serveur permettent d’invalider les prochaines requêtes immédiatement.
 
 Les autorisations d’édition et d’exécution sont également supprimées. L’éditeur
 conserve un éventuel brouillon non confirmé à l’écran pour permettre son
@@ -117,7 +123,9 @@ Si `/status` reconnaît l’appareil mais que `/files` affiche « Vérification 
 
 ## Protocole et limites de confiance
 
-La session utilise le cookie distinct `__Host-mysync-files`, `Secure`, `HttpOnly`, `SameSite=Strict`, avec `Path=/`. Seul son hash est enregistré sur le serveur. La phase anonyme expire après cinq minutes ; une preuve `files.read` valide prolonge l’autorisation jusqu’à 30 minutes après sa réception. Le cookie peut vivre 35 minutes pour couvrir ces deux phases, mais sa présence seule n’accorde aucun accès. Les sessions et challenges partagent les quotas bornés du [protocole de présence](web-status.md#protocole-et-limites).
+La session utilise le cookie distinct `__Host-mysync-files`, `Secure`, `HttpOnly`, `SameSite=Strict`, avec `Path=/`. Seul son hash est enregistré sur le serveur. La phase anonyme expire après cinq minutes ; une preuve `files.read` valide prolonge l’autorisation jusqu’à 30 minutes après sa réception. Les réponses autorisées de session et de résultat de preuve rafraîchissent le cookie jusqu’à l’échéance courante augmentée de cinq minutes, sans prolonger les droits serveur. Une simple lecture de session, un cookie ou une réponse locale non confirmée par le serveur ne suffisent jamais à renouveler l’autorisation.
+
+Les renouvellements sont liés au même appareil et au même appairage. Chaque scope supplémentaire conserve son échéance jusqu’à sa propre nouvelle preuve. Les identifiants des envois et exécutions encore autorisés sont conservés ; un changement d’instance du daemon renouvelle l’identité d’autorisation de l’exécution. Les sessions et challenges partagent les quotas bornés du [protocole de présence](web-status.md#protocole-et-limites). Dans une session de fichiers authentifiée, les anciens challenges expirés sont purgés, sauf ceux référencés par les autorisations, pour éviter une limite cumulative après plusieurs renouvellements. Les limites de création par minute et de challenges en attente restent applicables.
 
 Le ticket signé lie le scope, l’origine, l’audience, la session, l’appareil attendu le cas échéant et les dates. Le client contrôle les consentements locaux avant de signer une preuve avec le TPM. Le serveur consomme le challenge une seule fois, puis contrôle l’appairage, l’approbation, la révocation et l’expiration à chaque lecture ou envoi de bloc, ainsi que dans la transaction qui publie un fichier. Les routes de lecture web n’autorisent aucune mutation ; les routes d’envoi exigent `files.write` et vérifient aussi la propriété du transfert par cette session. La gestion des dossiers exige le scope distinct `files.manage`, contrôlé dans la transaction atomique de renommage ou suppression. Les réponses sont `no-store`, les erreurs sont génériques et les libellés sont insérés comme texte.
 

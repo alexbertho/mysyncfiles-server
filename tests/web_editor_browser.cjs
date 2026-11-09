@@ -24,11 +24,15 @@ async function suite(type, name) {
   async function setup(options={}) {
     const context = await browser.newContext({viewport:options.viewport || {width:1487,height:1058}, acceptDownloads:true});
     const page = await context.newPage(), errors = [], violations = [], saves = [], starts = [], tickets = new Map(), pending = [];
+    if(options.clock)await page.clock.install();
+    let clockOffset=0;
+    const now=()=>Math.floor((Date.now()+clockOffset)/1000), proofs=[];
+    let expires=now()+1800, editExpires=expires, runExpires=expires;
     const file = options.path || "Projets/Exemples/calcul.py";
     let content = options.content ?? sample, revision=1, mode=options.mode || "normal", edit=false, run=false, currentRun, reads=0;
     const release = () => pending.splice(0).forEach(r=>r());
     const entry = () => ({path:file, revision, sha256:hash(content), size:Buffer.byteLength(content), deleted:false});
-    const session = () => ({device_name:"test-device", expires_at:Math.floor(Date.now()/1000)+1800,chunk_bytes:8388608,download_limit:268435456});
+    const session = () => ({device_name:"test-device", expires_at:expires,renew_at:Math.min(expires,edit?editExpires:expires,run?runExpires:expires)-300,chunk_bytes:8388608,download_limit:268435456});
     page.on("pageerror",e=>errors.push(e.message));
     page.on("console",m=>{if(m.type()==="error" && /Content Security Policy|Refused to|violates/.test(m.text())) violations.push(m.text());});
     if (name==="chromium") await context.grantPermissions(["local-network-access"],{origin}).catch(()=>{});
@@ -40,12 +44,15 @@ async function suite(type, name) {
       if(mode==="offline") {await route.abort();return;}
       if(url.pathname==="/v1/status") {
         const scope=req.headers()["x-mysync-challenge"];
+        proofs.push(scope);
         if(scope==="edit-ticket") {
           if(mode==="edit_denied") {await reply({error:"files_edit_disabled"},403);return;}
-          edit=true;
+          edit=true;editExpires=expires;
         } else if(scope==="run-ticket") {
           if(mode==="run_denied") {await reply({error:"code_run_disabled"},403);return;}
-          run=true;
+          run=true;runExpires=expires;
+        } else if(scope==="read-ticket") {
+          expires=now()+1800;
         }
         await reply({});return;
       }
@@ -74,6 +81,9 @@ async function suite(type, name) {
         await route.fulfill({contentType:mime,headers:{"Content-Security-Policy":csp},body:fs.readFileSync(path.join(root,asset))});return;
       }
       if(url.pathname==="/v1/web/files/session") {await route.fulfill({json:session()});return;}
+      if(url.pathname==="/v1/web/files/challenges") {await route.fulfill({json:{challenge_id:"a".repeat(64),ticket:"read-ticket"}});return;}
+      if(url.pathname.startsWith("/v1/web/files/challenges/")) {await route.fulfill({json:session()});return;}
+      if(/^\/v1\/web\/files\/(write|manage)\/session$/.test(url.pathname)) {await route.fulfill({status:403,json:{error:url.pathname.includes("/write/")?"files_write_required":"files_manage_required"}});return;}
       if(url.pathname==="/v1/web/files/entries") {
         const folder=url.searchParams.get("directory")||"", prefix=folder?folder+"/":"";
         const rest=file.slice(prefix.length), next=rest.split("/")[0];
@@ -107,9 +117,27 @@ async function suite(type, name) {
     await page.waitForFunction(()=>!document.querySelector("#editor-tool").textContent.includes("en cours"));
     async function finish(label) {release();assert.deepEqual(errors,[]);assert.deepEqual(violations,[]);await context.close();console.log(`  ${label}: passed`);}
     async function capture(label) {if(process.env.MYSYNC_SCREENSHOTS){fs.mkdirSync(process.env.MYSYNC_SCREENSHOTS,{recursive:true});await page.screenshot({path:path.join(process.env.MYSYNC_SCREENSHOTS,`${name}-editor-${label}.png`)});}}
-    return {page,context,saves,starts,release,finish,capture,setMode:v=>mode=v,setRemote:v=>{content=v;revision++;},reads:()=>reads};
+    return {proofs,advance:async ms=>{clockOffset+=ms;await page.clock.fastForward(ms);},page,context,saves,starts,release,finish,capture,setMode:v=>mode=v,setRemote:v=>{content=v;revision++;},reads:()=>reads};
   }
   try {
+    {
+      const t=await setup({clock:true,mode:"keep_running"}),p=t.page;
+      await t.advance(25*60*1000-3000);
+      await replaceCode(p,"print('renewed')");
+      await p.waitForFunction(()=>document.querySelector("#editor-save-state").textContent==="Enregistré");
+      await p.locator("#editor-run").click();
+      await p.waitForFunction(()=>document.querySelector("#editor-run").textContent.includes("Arrêter"));
+      const renewed=p.waitForResponse(r=>r.url().includes("/run/challenges/") && r.status()===200);
+      await t.advance(3000);await renewed;
+      assert.deepEqual(t.proofs,["edit-ticket","run-ticket","read-ticket","edit-ticket","run-ticket"]);
+      assert.equal(await readCode(p),"print('renewed')");
+      assert.equal(await p.locator("#code-input").getAttribute("contenteditable"),"true");
+      assert.equal(await p.locator("#code-editor").isVisible(),true);
+      assert.match(await p.locator("#editor-run").textContent(),/Arrêter/);
+      assert.equal(t.starts.length,1,"renewal must not restart a running program");
+      assert.equal(t.reads(),1,"renewal must not replace the open editor buffer");
+      await t.finish("automatic renewal preserves editing, buffer and running program");
+    }
     {
       const t=await setup({content:"if ready:"}),p=t.page,input=p.locator("#code-input");
       await input.press("Control+End");await p.keyboard.press("Enter");

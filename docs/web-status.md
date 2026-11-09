@@ -73,7 +73,7 @@ Chaque challenge est indépendant, y compris entre onglets. Une actualisation d�
 | Corps de preuve et réponses JSON | 4 Kio |
 | Connexions locales simultanées | 8, sans connexion persistante |
 | Preuves locales | 1 en cours, 6 tentatives par minute |
-| Challenges par session | 4 en attente, 12 créations par minute, 32 créations au total |
+| Challenges par session | 4 en attente, 12 créations par minute, 32 lignes conservées (les anciens challenges de fichiers expirés et non référencés sont purgés) |
 | Sessions navigateur actives | 1 024 |
 
 La file du signataire TPM reste bornée et ignore les demandes annulées avant leur traitement. Une opération TPM déjà commencée peut finir après l’annulation HTTP. Tous les résultats sont `no-store`. Les tickets passent dans des en-têtes ou des corps, jamais dans les URL ou les messages de log. Le proxy doit conserver ces règles et ne pas journaliser les corps ou en-têtes d’authentification.

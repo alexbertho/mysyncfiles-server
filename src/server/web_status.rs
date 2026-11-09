@@ -20,7 +20,7 @@ use std::{sync::Arc, time::Duration};
 const COOKIE: &str = "__Host-mysync-status";
 const MAX_SESSIONS: i64 = 1024;
 const MAX_PENDING: i64 = 4;
-// Also bound consumed rows and repeated issuance within each five-minute session.
+// Also bound retained rows and repeated issuance within each browser session.
 const MAX_CHALLENGES: i64 = 32;
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self' http://127.0.0.1:47831; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
 // Browser PDF readers install their own privileged viewer document. The HTML
@@ -77,6 +77,19 @@ pub(super) fn purge(db: &Connection) -> rusqlite::Result<()> {
         "DELETE FROM web_status_sessions WHERE expires_at<=?1",
         [now()],
     )?;
+    // File sessions can renew indefinitely. Keep recent challenges for rate
+    // limits/presence and the proofs still referenced by active grants; prune
+    // only expired challenges from authenticated file sessions.
+    db.execute(
+        "DELETE FROM web_status_challenges AS c WHERE expires_at<=?1 AND issued_at<=?1-60
+        AND COALESCE(presence_expires_at,0)<=?1
+        AND EXISTS(SELECT 1 FROM web_file_grants g WHERE g.session_hash=c.session_hash)
+        AND NOT EXISTS(SELECT 1 FROM web_file_grants g WHERE g.session_hash=c.session_hash AND g.challenge_id=c.id)
+        AND NOT EXISTS(SELECT 1 FROM web_file_write_grants g WHERE g.session_hash=c.session_hash AND g.challenge_id=c.id)
+        AND NOT EXISTS(SELECT 1 FROM web_file_manage_grants g WHERE g.session_hash=c.session_hash AND g.challenge_id=c.id)
+        AND NOT EXISTS(SELECT 1 FROM web_editor_grants g WHERE g.session_hash=c.session_hash AND g.challenge_id=c.id)",
+        [now()],
+    )?;
     Ok(())
 }
 
@@ -122,7 +135,7 @@ pub(super) fn browser_request(
     Ok(())
 }
 
-pub(super) fn cookie_hash(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
+pub(super) fn cookie_token<'a>(headers: &'a HeaderMap, cookie_name: &str) -> Option<&'a str> {
     let mut found = None;
     for value in headers.get_all(header::COOKIE) {
         for cookie in value.to_str().ok()?.split(';') {
@@ -132,11 +145,15 @@ pub(super) fn cookie_hash(headers: &HeaderMap, cookie_name: &str) -> Option<Stri
                 if found.is_some() || !valid_secret(value) {
                     return None;
                 }
-                found = Some(hash(value));
+                found = Some(value);
             }
         }
     }
     found
+}
+
+pub(super) fn cookie_hash(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
+    cookie_token(headers, cookie_name).map(hash)
 }
 
 pub(super) struct BrowserSession {
@@ -320,6 +337,18 @@ pub(super) fn issue_challenge(
         .as_deref()
         .map(|id| verified_result(&tx, &session, id).map(|p| p.device_id))
         .transpose()?;
+    if scope == "files.read" {
+        // Renewals stay on the original device, even when another local
+        // profile starts answering on the bridge port.
+        expected_device_id = tx
+            .query_row(
+                "SELECT device_id FROM web_file_grants WHERE session_hash=?1",
+                [&session.hash],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(ApiError::internal)?;
+    }
     if matches!(
         scope,
         "files.write" | "files.manage" | "files.edit" | "code.run"
@@ -437,10 +466,20 @@ fn accept_proof(
         // Only a consumed files.read proof can extend a browser session. The
         // status cookie and status.read tickets never receive file authority.
         let expires = now() + FILES_SESSION_SECONDS;
-        tx.execute("DELETE FROM web_file_write_grants WHERE session_hash=(SELECT session_hash FROM web_status_challenges WHERE id=?1)", [&claims.challenge_id]).map_err(ApiError::internal)?;
-        tx.execute("DELETE FROM web_file_manage_grants WHERE session_hash=(SELECT session_hash FROM web_status_challenges WHERE id=?1)", [&claims.challenge_id]).map_err(ApiError::internal)?;
-        tx.execute("DELETE FROM web_editor_grants WHERE session_hash=(SELECT session_hash FROM web_status_challenges WHERE id=?1)", [&claims.challenge_id]).map_err(ApiError::internal)?;
-        tx.execute("DELETE FROM web_runner_tickets WHERE session_hash=(SELECT session_hash FROM web_status_challenges WHERE id=?1)", [&claims.challenge_id]).map_err(ApiError::internal)?;
+        let existing: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT g.device_id,g.enrollment_id FROM web_file_grants g
+            JOIN web_status_challenges c ON c.session_hash=g.session_hash WHERE c.id=?1",
+                [&claims.challenge_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(ApiError::internal)?;
+        if existing.is_some_and(|(id, enrollment)| id != device_id || enrollment != enrollment_id) {
+            return Err(denied());
+        }
+        // Retain outstanding uploads and editor ownership. A read proof never
+        // extends any other scope: each needs its own fresh local consent.
         tx.execute("INSERT INTO web_file_grants(session_hash,challenge_id,device_id,enrollment_id,expires_at)
             SELECT session_hash,id,?2,?3,?4 FROM web_status_challenges WHERE id=?1
             ON CONFLICT(session_hash) DO UPDATE SET challenge_id=excluded.challenge_id,device_id=excluded.device_id,enrollment_id=excluded.enrollment_id,expires_at=excluded.expires_at",
@@ -458,7 +497,9 @@ fn accept_proof(
             SELECT g.session_hash,?1,g.expires_at FROM web_file_grants g
             JOIN web_status_challenges c ON c.session_hash=g.session_hash
             WHERE c.id=?1 AND g.device_id=?2 AND g.enrollment_id=?3 AND g.expires_at>?4
-            ON CONFLICT(session_hash) DO UPDATE SET challenge_id=excluded.challenge_id,expires_at=excluded.expires_at",
+            ON CONFLICT(session_hash) DO UPDATE SET
+            challenge_id=CASE WHEN web_file_write_grants.expires_at>?4 THEN web_file_write_grants.challenge_id ELSE excluded.challenge_id END,
+            expires_at=excluded.expires_at",
             params![claims.challenge_id, device_id, enrollment_id, now()]).map_err(ApiError::internal)?;
         if updated != 1 {
             return Err(denied());
@@ -480,7 +521,9 @@ fn accept_proof(
             SELECT g.session_hash,?5,?1,?6,g.expires_at FROM web_file_grants g
             JOIN web_status_challenges c ON c.session_hash=g.session_hash
             WHERE c.id=?1 AND g.device_id=?2 AND g.enrollment_id=?3 AND g.expires_at>?4
-            ON CONFLICT(session_hash,scope) DO UPDATE SET challenge_id=excluded.challenge_id,instance_id=excluded.instance_id,expires_at=excluded.expires_at",
+            ON CONFLICT(session_hash,scope) DO UPDATE SET
+            challenge_id=CASE WHEN web_editor_grants.expires_at>?4 AND web_editor_grants.instance_id=excluded.instance_id THEN web_editor_grants.challenge_id ELSE excluded.challenge_id END,
+            instance_id=excluded.instance_id,expires_at=excluded.expires_at",
             params![claims.challenge_id, device_id, enrollment_id, now(), claims.scope, result.instance_id]).map_err(ApiError::internal)?;
         if updated != 1 {
             return Err(denied());
@@ -705,6 +748,151 @@ mod tests {
             f.state.db.lock().unwrap().execute_batch(sql)?;
             assert!(accept_proof(&f.state, 1, "enrollment-1", f.proof(&challenge)).is_err());
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_renewals_preserve_ownership_but_require_each_scope_and_enrollment() -> Result<()>
+    {
+        let f = Fixture::new()?;
+        let headers = f.browser().await?;
+        let issue = |scope| {
+            issue_challenge(&f.state, &headers, b"{}", COOKIE, scope)
+                .map_err(|e| anyhow::anyhow!(e.1))
+        };
+        let read = issue("files.read")?;
+        accept_proof(&f.state, 1, "enrollment-1", f.proof(&read))
+            .map_err(|e| anyhow::anyhow!(e.1))?;
+        let mut ids = Vec::new();
+        for scope in ["files.write", "files.manage", "files.edit", "code.run"] {
+            let challenge = issue(scope)?;
+            accept_proof(&f.state, 1, "enrollment-1", f.proof(&challenge))
+                .map_err(|e| anyhow::anyhow!(e.1))?;
+            ids.push(challenge.challenge_id);
+        }
+        let old_expiry = now() + 60;
+        {
+            let db = f.state.db.lock().unwrap();
+            for table in [
+                "web_status_sessions",
+                "web_file_grants",
+                "web_file_write_grants",
+                "web_file_manage_grants",
+                "web_editor_grants",
+            ] {
+                db.execute(&format!("UPDATE {table} SET expires_at=?1"), [old_expiry])?;
+            }
+            db.execute("INSERT INTO device_enrollments(id,device_id,invitation_hash,expires_at,verified_at,approved_at)
+                VALUES('replacement',1,'replacement',9999999999,1,1)", [])?;
+        }
+        let renewed = issue("files.read")?;
+        let claims = Challenge::verify(
+            &renewed.ticket,
+            &f.state.origin_key.verifying_key(),
+            "https://sync.example.com",
+            now(),
+        )?;
+        assert_eq!(claims.expected_device_id, Some(1));
+        assert!(accept_proof(&f.state, 2, "enrollment-2", f.proof(&renewed)).is_err());
+        assert!(accept_proof(&f.state, 1, "replacement", f.proof(&renewed)).is_err());
+        accept_proof(&f.state, 1, "enrollment-1", f.proof(&renewed))
+            .map_err(|e| anyhow::anyhow!(e.1))?;
+        assert!(accept_proof(&f.state, 1, "enrollment-1", f.proof(&renewed)).is_err());
+        {
+            let db = f.state.db.lock().unwrap();
+            assert!(
+                db.query_row("SELECT expires_at FROM web_file_grants", [], |r| r
+                    .get::<_, i64>(0))?
+                    > old_expiry
+            );
+            for table in [
+                "web_file_write_grants",
+                "web_file_manage_grants",
+                "web_editor_grants",
+            ] {
+                assert_eq!(
+                    db.query_row(&format!("SELECT MIN(expires_at) FROM {table}"), [], |r| r
+                        .get::<_, i64>(
+                        0
+                    ))?,
+                    old_expiry
+                );
+            }
+        }
+        for scope in ["files.write", "files.edit", "code.run"] {
+            let challenge = issue(scope)?;
+            accept_proof(&f.state, 1, "enrollment-1", f.proof(&challenge))
+                .map_err(|e| anyhow::anyhow!(e.1))?;
+        }
+        {
+            let db = f.state.db.lock().unwrap();
+            let write: (String, i64) = db.query_row(
+                "SELECT challenge_id,expires_at FROM web_file_write_grants",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            assert_eq!(write.0, ids[0]);
+            assert!(write.1 > old_expiry);
+            for (scope, id) in [("files.edit", &ids[2]), ("code.run", &ids[3])] {
+                let grant: (String, i64) = db.query_row(
+                    "SELECT challenge_id,expires_at FROM web_editor_grants WHERE scope=?1",
+                    [scope],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?;
+                assert_eq!(&grant.0, id);
+                assert!(grant.1 > old_expiry);
+            }
+        }
+        // A restarted daemon must not inherit the old runner's ownership.
+        let restarted = issue("code.run")?;
+        let mut proof = f.proof(&restarted);
+        proof.instance_id = "d".repeat(64);
+        accept_proof(&f.state, 1, "enrollment-1", proof).map_err(|e| anyhow::anyhow!(e.1))?;
+        assert_eq!(
+            f.state.db.lock().unwrap().query_row(
+                "SELECT challenge_id FROM web_editor_grants WHERE scope='code.run'",
+                [],
+                |r| r.get::<_, String>(0)
+            )?,
+            restarted.challenge_id
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_renewals_outlive_the_challenge_quota_without_allowing_replay() -> Result<()> {
+        let f = Fixture::new()?;
+        let headers = f.browser().await?;
+        let mut first = None;
+        for _ in 0..64 {
+            let challenge = issue_challenge(&f.state, &headers, b"{}", COOKIE, "files.read")
+                .map_err(|e| anyhow::anyhow!(e.1))?;
+            let proof = f.proof(&challenge);
+            first.get_or_insert_with(|| proof.clone());
+            accept_proof(&f.state, 1, "enrollment-1", proof).map_err(|e| anyhow::anyhow!(e.1))?;
+            // Advance challenge retention/rate windows without sleeping.
+            f.state.db.lock().unwrap().execute("UPDATE web_status_challenges SET issued_at=?1,expires_at=?1,presence_expires_at=?1", [now()-180])?;
+        }
+        let db = f.state.db.lock().unwrap();
+        purge(&db)?;
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM web_status_challenges", [], |r| r
+                .get::<_, i64>(0))?,
+            1
+        );
+        drop(db);
+        assert!(accept_proof(&f.state, 1, "enrollment-1", first.unwrap()).is_err());
+        // Fresh challenges still obey the pending quota.
+        for _ in 0..MAX_PENDING {
+            assert!(issue_challenge(&f.state, &headers, b"{}", COOKIE, "files.read").is_ok());
+        }
+        assert_eq!(
+            issue_challenge(&f.state, &headers, b"{}", COOKIE, "files.read")
+                .err()
+                .unwrap()
+                .0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
         Ok(())
     }
 

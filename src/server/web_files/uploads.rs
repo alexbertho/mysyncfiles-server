@@ -232,7 +232,16 @@ mod tests {
             assert!(part(&f, &forged, &id, 0, b"x").await.is_err());
             assert!(finish(&f, &forged, &id).await.is_err());
         }
-        // A fresh read proof cannot inherit the previous write authorization.
+        // Renewal on the same enrollment keeps the in-flight upload usable.
+        f.grant(&a, "files.read").await?;
+        f.grant(&a, "files.write").await?;
+        checked(part(&f, &a, &id, 0, b"x").await)?;
+        // Expired write authority cannot be resurrected by renewing read.
+        f.state
+            .db
+            .lock()
+            .unwrap()
+            .execute("UPDATE web_file_write_grants SET expires_at=1", [])?;
         f.grant(&a, "files.read").await?;
         assert_eq!(
             part(&f, &a, &id, 0, b"x").await.unwrap_err().1,

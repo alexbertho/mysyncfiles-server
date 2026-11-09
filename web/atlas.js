@@ -86,18 +86,22 @@
     } finally { clearTimeout(timer); signal?.removeEventListener("abort", abort); }
   }
   const post = (url, signal) => request(url, {method: "POST", signal, headers: {"Content-Type": "application/json"}, body: "{}"});
-  let session, expiry, countdown, listingRequest, verification, transfer;
+  let session, expiry, renewalTimer, renewal, listingRequest, verification, transfer;
+  const renewAhead = 5 * 60 * 1000;
+  let automatic = preference("mysync-auto-access") !== "off";
+  const autoAccess = () => automatic && preference("mysync-auto-access") !== "off";
+  const setAutoAccess = enabled => { automatic = enabled; preference("mysync-auto-access", enabled ? "on" : "off"); };
   let upload, pickerContext, dragDepth = 0, dragCancelled = false;
   let directory = "", search = "", cursors = [""], pageIndex = 0, next;
   let displayedQuery, displayedEntries, retryView;
   let selected, selectedButton, menuEntry, menuButton, searchTimer, toastTimer, detailsTimer, folderAction, folderRequest;
   let epoch = 0;
   let channel;
-  try { channel = new BroadcastChannel("mysync-files"); channel.onmessage = event => { if (event.data === "logout") lock("expired"); }; } catch (_) {}
+  try { channel = new BroadcastChannel("mysync-files"); channel.onmessage = event => { if (event.data === "logout") { automatic = false; lock("expired"); } }; } catch (_) {}
   const menu = $("file-menu");
   const messages = {
     initial: ["Vérifier cet appareil", "Le client MySyncFiles doit être lancé sur ce PC. Le navigateur peut demander l’autorisation d’accéder à cet appareil.", "Vérifier cet appareil", "laptop"],
-    expired: ["Session expirée", "Votre session de lecture est terminée. Vérifiez à nouveau cet appareil pour poursuivre la consultation des fichiers.", "Vérifier à nouveau", "clock"],
+    expired: ["Session expirée", "L’accès automatique n’a pas pu être renouvelé. Vérifiez que le client MySyncFiles est lancé et que cet appareil est toujours autorisé.", "Réessayer", "clock"],
     denied: ["Permission d’accès local refusée", "Le navigateur a bloqué l’accès au client MySyncFiles sur ce PC. Autorisez l’accès à cet appareil dans les permissions du site, puis réessayez.", "Réessayer", "warning"],
     disabled: ["Lecture des fichiers non autorisée", "Autorisez la lecture web sur le client de cet appareil avec mysync web-files enable, puis relancez le daemon.", "Réessayer", "warning"],
     rejected: ["Vérification locale refusée", "Vérifiez que le client installé prend en charge la lecture web, puis redémarrez son service. Vérifiez aussi qu’il utilise le même serveur et que l’horloge du PC est correcte.", "Réessayer", "warning"],
@@ -141,8 +145,8 @@
     epoch++;
     folderRequest?.abort(); $("folder-dialog").close(); folderAction = undefined;
     session = undefined;
-    clearTimeout(expiry); clearInterval(countdown); clearTimeout(searchTimer);
-    listingRequest?.abort(); verification?.abort(); transfer?.abort(); upload?.abort();
+    clearTimeout(expiry); clearTimeout(renewalTimer); clearTimeout(searchTimer);
+    listingRequest?.abort(); verification?.abort(); renewal?.abort(); transfer?.abort(); upload?.abort();
     clearDrop(); dragCancelled = false; pickerContext = undefined; $("upload-input").value = "";
     $("upload-status").hidden = true; $("upload-results").replaceChildren();
     $("upload-message").textContent = ""; $("upload-destination").textContent = "";
@@ -172,10 +176,11 @@
     const remaining = Math.min(1800000, value.expires_at * 1000 - Date.now());
     if (remaining <= 0) throw new Failure("session_expired");
     session = value;
-    clearTimeout(expiry); clearInterval(countdown);
+    clearTimeout(expiry); clearTimeout(renewalTimer);
     expiry = setTimeout(() => lock("expired"), remaining);
-    const tick = () => { $("session-time").textContent = `Session de lecture · ${Math.max(1, Math.ceil((value.expires_at * 1000 - Date.now()) / 60000))} min`; };
-    tick(); countdown = setInterval(tick, 15000);
+    const renewIn = Number.isSafeInteger(value.renew_at) ? value.renew_at * 1000 - Date.now() : remaining - renewAhead;
+    if (!statusPage) renewalTimer = setTimeout(renewSession, Math.max(1000, Math.min(remaining - renewAhead, renewIn)));
+    $("session-time").textContent = "Accès automatique";
     $("session-dot").className = "session-dot verified";
     $("session-label").textContent = "Appareil reconnu";
     $("logout").hidden = false;
@@ -183,6 +188,7 @@
     else if (!statusPage) { $("access").hidden = true; $("explorer").hidden = false; $("search").disabled = false; $("refresh").hidden = false; }
   }
   async function restore() {
+    if (statusPage || !autoAccess()) return;
     const current = epoch;
     try {
       const value = await request("/v1/web/files/session");
@@ -193,7 +199,68 @@
         const folder = new URLSearchParams(location.search).get("directory") || "";
         await load({...currentView(), directory: folder});
       }
-    } catch (_) { /* An anonymous browser sees only the access screen. */ }
+    } catch (error) {
+      if (epoch === current && autoAccess() && ["session_expired", "authentication_refused"].includes(error.code)) await verify();
+    }
+  }
+  async function prove(base, signal) {
+    const challenge = await post(`${base}/challenges`, signal);
+    if (!/^[a-f0-9]{64}$/.test(challenge.challenge_id) || typeof challenge.ticket !== "string" || challenge.ticket.length > 2048) throw new Failure("invalid_response");
+    let localError;
+    try {
+      const local = await request("http://127.0.0.1:47831/v1/status", {local: true, signal, timeout: 10000,
+        headers: {"X-MySync-Bridge": "1", "X-MySync-Challenge": challenge.ticket}});
+      if (!local.response.ok) localError = local.data.error;
+    } catch (_) { /* A lost acknowledgement can follow a committed TPM proof. */ }
+    if (signal.aborted) throw new Failure("cancelled");
+    try { return await request(`${base}/challenges/${challenge.challenge_id}`, {signal, timeout: 3000}); }
+    catch (error) {
+      if (error.code === "pending" && localError) throw new Failure(localError === "invalid_challenge" ? "local_rejected" : localError);
+      throw error;
+    }
+  }
+  async function renewSession() {
+    if (!session || renewal || verification || !autoAccess()) return;
+    const controller = new AbortController(); renewal = controller;
+    const {signal} = controller, current = epoch;
+    const renew = async () => {
+      // A sibling tab may already have renewed the shared cookie and grants.
+      const value = await request("/v1/web/files/session", {signal});
+      if (signal.aborted || current !== epoch || !autoAccess()) return;
+      const renewAt = Number.isSafeInteger(value.renew_at) ? value.renew_at * 1000 : value.expires_at * 1000 - renewAhead;
+      if (renewAt > Date.now() + 1000) { acceptSession(value); return; }
+      const scopes = [];
+      for (const base of ["/v1/web/files/write", "/v1/web/files/manage", "/v1/web/editor/edit", "/v1/web/editor/run"]) {
+        try { await request(`${base}/session`, {signal}); scopes.push(base); }
+        catch (error) {
+          if (!["files_write_required", "files_manage_required", "files_edit_required", "code_run_required", "invalid_scope", "not_found"].includes(error.code)) throw error;
+        }
+      }
+      const renewed = value.expires_at * 1000 - Date.now() <= renewAhead + 1000 ? await prove("/v1/web/files", signal) : value;
+      if (signal.aborted || current !== epoch || !autoAccess()) return;
+      acceptSession(renewed);
+      // Each existing capability needs its own fresh proof. Read authority
+      // alone never renews upload, management, editing or execution consent.
+      let failure;
+      for (const base of scopes) {
+        if (signal.aborted || current !== epoch || !autoAccess()) return;
+        try { await prove(base, signal); } catch (error) { failure ||= error; }
+      }
+      const complete = await request("/v1/web/files/session", {signal});
+      if (!signal.aborted && current === epoch && autoAccess()) acceptSession(complete);
+      if (failure) throw failure;
+    };
+    try {
+      if (navigator.locks) await navigator.locks.request("mysync-files-renew", {signal}, renew);
+      else await renew();
+    } catch (error) {
+      if (signal.aborted || current !== epoch) return;
+      if (["session_expired", "authentication_refused"].includes(error.code)) { lock("expired"); return; }
+      // Keep the still-authorized view and retry transient failures. The hard
+      // server deadline and local expiry timer remain in force.
+      clearTimeout(renewalTimer);
+      renewalTimer = setTimeout(renewSession, 60000);
+    } finally { if (renewal === controller) renewal = undefined; }
   }
   async function denied() {
     if (!navigator.permissions) return false;
@@ -202,12 +269,12 @@
     }
     return false;
   }
-  $("file-verify").addEventListener("click", async () => {
+  async function verify() {
     if (verification) return;
     const controller = new AbortController(); verification = controller;
     const current = epoch;
     let userCancelled = false, stage = "local";
-    const cancel = () => { userCancelled = true; controller.abort(); };
+    const cancel = () => { userCancelled = true; setAutoAccess(false); controller.abort(); };
     $("file-cancel").onclick = cancel;
     $("file-verify").disabled = true; $("file-verify").textContent = "Vérification…"; $("file-cancel").hidden = false;
     $("access-message").textContent = "Vérification en cours…";
@@ -219,27 +286,12 @@
       if (probe.response.status !== 401 || probe.data.error !== "challenge_required") throw new Failure("local_unverified");
       clearTimeout(waiting); stage = "server";
       await post("/v1/web/files/session", controller.signal);
-      const challenge = await post("/v1/web/files/challenges", controller.signal);
-      if (!/^[a-f0-9]{64}$/.test(challenge.challenge_id) || typeof challenge.ticket !== "string" || challenge.ticket.length > 2048) throw new Failure("invalid_response");
       $("access-message").textContent = "Vérification de l’autorisation de lecture…";
-      let localError;
-      try {
-        const local = await request(localURL, {local: true, signal: controller.signal, timeout: 10000, headers: {"X-MySync-Bridge": "1", "X-MySync-Challenge": challenge.ticket}});
-        if (!local.response.ok) localError = local.data.error;
-      } catch (_) { /* A lost acknowledgement can follow a committed TPM proof. */ }
-      if (controller.signal.aborted) throw new Failure("cancelled");
-      let value;
-      try { value = await request(`/v1/web/files/challenges/${challenge.challenge_id}`, {signal: controller.signal, timeout: 3000}); }
-      catch (error) {
-        if (error.code === "pending") {
-          if (localError === "files_read_disabled") throw new Failure("files_read_disabled");
-          if (localError === "invalid_challenge") throw new Failure("local_rejected");
-        }
-        throw error;
-      }
+      const value = await prove("/v1/web/files", controller.signal);
       if (current !== epoch || controller.signal.aborted) return;
       acceptSession(value);
-      if (editorPage) await codeEditor.open(); else await load();
+      if (editorPage) await codeEditor.open();
+      else await load({...currentView(), directory: new URLSearchParams(location.search).get("directory") || ""});
     } catch (error) {
       if (current !== epoch) return;
       if (userCancelled) {
@@ -260,8 +312,10 @@
         if ($("access-icon").querySelector("use").getAttribute("href").endsWith("#spinner")) setIcon("access-icon", "laptop");
       }
     }
-  });
+  }
+  $("file-verify").addEventListener("click", () => { setAutoAccess(true); verify(); });
   $("logout").addEventListener("click", async () => {
+    setAutoAccess(false);
     lock("initial", "Déconnexion en cours…");
     $("file-verify").disabled = true;
     try { await post("/v1/web/files/logout"); channel?.postMessage("logout"); access("initial", "Vous êtes déconnecté."); }
@@ -877,10 +931,16 @@
     }
   }
   // Never restore private names from the back-forward cache without a fresh
-  // server authorization. Only theme/navigation preferences use local storage.
+  // server authorization. Only UI/automatic-access preferences use local storage.
   addEventListener("pagehide", () => lock());
   addEventListener("pageshow", event => { if (event.persisted) restore(); });
-  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && session && session.expires_at * 1000 <= Date.now()) lock("expired"); });
+  addEventListener("storage", event => { if (event.key === "mysync-auto-access" && event.newValue === "off") lock(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible" || statusPage || !autoAccess()) return;
+    if (session && session.expires_at * 1000 <= Date.now()) lock("expired");
+    if (session) renewSession();
+    else if ($("access").dataset.state === "expired") verify();
+  });
   if (editorPage) codeEditor = window.MySyncEditor({request, post, Failure, icon});
   restore();
 })();

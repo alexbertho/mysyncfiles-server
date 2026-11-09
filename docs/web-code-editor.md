@@ -70,8 +70,12 @@ l’enrôlement TPM approuvés. L’exécution est aussi liée à l’instance d
 local qui a fourni la preuve. Elle exige un ticket à usage unique, valable
 15 secondes, puis une vérification TPM auprès du serveur. Les tickets de
 lecture, d’envoi et de gestion des dossiers ne donnent pas ces droits.
-Une nouvelle vérification de lecture annule les autorisations supplémentaires.
-Les autorisations d’édition expirent au plus tard avec la session de 30 minutes.
+Le renouvellement de lecture conserve les autorisations supplémentaires sans
+prolonger leur échéance. Atlas les renouvelle automatiquement par leurs propres
+preuves locales avant expiration, sans interrompre l’édition ou une exécution
+encore autorisée. Sans renouvellement, elles expirent au plus tard avec la
+dernière session de lecture accordée. Un redémarrage du daemon change l’identité
+de l’autorisation d’exécution et ne reprend pas un ancien lancement.
 
 ## Sauvegarde et conflits
 

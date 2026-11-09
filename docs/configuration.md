@@ -19,7 +19,7 @@ La commande `device auth-configure` enregistre dans SQLite l'origine publique HT
 
 Toutes les commandes visant un serveur acceptent `--profile NOM` ; préciser ce nom dès que plusieurs serveurs sont enregistrés. `mysync profiles` affiche les connexions locales. Les dossiers doivent être distincts et non imbriqués, y compris pour les appairages en attente.
 
-`web_files_enabled` est une autorisation distincte, désactivée par défaut, y compris pour les profils existants. `mysync web-files enable` autorise les nouveaux challenges `files.read` après redémarrage du daemon ; `disable` les refuse. Le pont `web_status_enabled` doit aussi être actif. Le statut seul ne permet pas de lire les fichiers. Voir [l’explorateur web Atlas](web-files.md) pour les sessions de 30 minutes et la révocation.
+`web_files_enabled` est une autorisation distincte, désactivée par défaut, y compris pour les profils existants. `mysync web-files enable` autorise les nouveaux challenges `files.read` après redémarrage du daemon ; `disable` les refuse. Le pont `web_status_enabled` doit aussi être actif. Le statut seul ne permet pas de lire les fichiers. Voir [l’explorateur web Atlas](web-files.md) pour l’accès automatique lié au client local et la révocation.
 
 `web_uploads_enabled` autorise séparément l’ajout de fichiers depuis Atlas. Il est désactivé par défaut et se règle avec `mysync web-files enable-upload` ou `disable-upload`, puis un redémarrage du daemon. Une preuve `files.write` exige aussi `web_files_enabled` ; autoriser la lecture seule n’autorise jamais l’envoi. L’envoi web refuse de remplacer les fichiers existants.
 

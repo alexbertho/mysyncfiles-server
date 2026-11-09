@@ -130,9 +130,43 @@ async fn start_session(
 async fn read_session(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
-) -> Result<Json<FileSession>, ApiError> {
+) -> Result<Response, ApiError> {
     browser(&state, &headers, false)?;
-    authorize(&state.db.lock().unwrap(), &headers).map(Json)
+    session_response(&state.db.lock().unwrap(), &headers)
+}
+
+fn session_response(db: &Connection, headers: &HeaderMap) -> Result<Response, ApiError> {
+    let session = authorize(db, headers)?;
+    let token = web_status::cookie_token(headers, COOKIE).ok_or_else(expired)?;
+    let deadline: i64 = db.query_row(
+        "SELECT MIN(expires_at) FROM (
+        SELECT ?2 AS expires_at
+        UNION ALL SELECT expires_at FROM web_file_write_grants WHERE session_hash=?1 AND expires_at>?3
+        UNION ALL SELECT expires_at FROM web_file_manage_grants WHERE session_hash=?1 AND expires_at>?3
+        UNION ALL SELECT expires_at FROM web_editor_grants WHERE session_hash=?1 AND expires_at>?3)",
+        params![crate::auth_protocol::hash(token), session.expires_at, now()], |r| r.get(0),
+    ).map_err(ApiError::internal)?;
+    // Refresh transport lifetime after a proof or a lost acknowledgement.
+    // Merely reading the session never extends its server-side authorization.
+    let seconds = (session.expires_at - now()).max(0) + SESSION_SECONDS;
+    #[derive(Serialize)]
+    struct RenewableSession {
+        #[serde(flatten)]
+        session: FileSession,
+        renew_at: i64,
+    }
+    let mut response = Json(RenewableSession {
+        session,
+        renew_at: deadline - SESSION_SECONDS,
+    })
+    .into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        format!("{COOKIE}={token}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age={seconds}")
+            .parse()
+            .unwrap(),
+    );
+    Ok(response)
 }
 
 async fn logout(
@@ -173,7 +207,7 @@ async fn challenge_result(
     State(state): State<Arc<ServerState>>,
     Path(id): Path<String>,
     headers: HeaderMap,
-) -> Result<Json<FileSession>, ApiError> {
+) -> Result<Response, ApiError> {
     browser(&state, &headers, false)?;
     let db = state.db.lock().unwrap();
     let session = web_status::named_session(&db, &headers, COOKIE).map_err(|_| expired())?;
@@ -196,7 +230,7 @@ async fn challenge_result(
             failure(StatusCode::ACCEPTED, "pending")
         });
     }
-    authorize(&db, &headers).map(Json)
+    session_response(&db, &headers)
 }
 
 #[derive(Default, Deserialize)]
@@ -629,9 +663,16 @@ mod tests {
                 .is_err()
         );
         let id = f.grant(&a, "files.read").await?;
-        let session =
-            checked(challenge_result(State(f.state.clone()), Path(id.clone()), a.clone()).await)?.0;
-        assert!((now() + 1798..=now() + 1800).contains(&session.expires_at));
+        let response =
+            checked(challenge_result(State(f.state.clone()), Path(id.clone()), a.clone()).await)?;
+        assert!(
+            response.headers()[header::SET_COOKIE]
+                .to_str()?
+                .contains("HttpOnly")
+        );
+        let session: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await?)?;
+        assert!((now() + 1798..=now() + 1800).contains(&session["expires_at"].as_i64().unwrap()));
         assert!(
             challenge_result(State(f.state.clone()), Path(id), b.clone())
                 .await
@@ -704,6 +745,56 @@ mod tests {
         );
         Ok(())
     }
+    #[tokio::test]
+    async fn session_reads_refresh_only_cookie_lifetime_and_track_the_earliest_scope() -> Result<()>
+    {
+        let f = Fixture::new()?;
+        let token = "a".repeat(64);
+        let hash = crate::auth_protocol::hash(&token);
+        let deadline = now() + 1000;
+        let response = {
+            let db = f.state.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO web_status_sessions VALUES(?1,'binding',?2)",
+                params![hash, deadline],
+            )?;
+            db.execute(
+                "INSERT INTO web_file_grants VALUES(?1,'read',1,'enrollment',?2)",
+                params![hash, deadline],
+            )?;
+            db.execute(
+                "INSERT INTO web_file_write_grants VALUES(?1,'write',?2)",
+                params![hash, deadline - 500],
+            )?;
+            let mut headers = HeaderMap::new();
+            headers.insert(header::COOKIE, format!("{COOKIE}={token}").parse()?);
+            let response = checked(session_response(&db, &headers))?;
+            let cookie = response.headers()[header::SET_COOKIE].to_str()?;
+            for flag in ["Secure", "HttpOnly", "SameSite=Strict", "Path=/"] {
+                assert!(cookie.contains(flag));
+            }
+            let age: i64 = cookie.split("Max-Age=").nth(1).unwrap().parse()?;
+            assert!((1298..=1300).contains(&age));
+            assert_eq!(
+                db.query_row("SELECT expires_at FROM web_file_grants", [], |r| r
+                    .get::<_, i64>(0))?,
+                deadline
+            );
+            assert_eq!(
+                db.query_row("SELECT expires_at FROM web_status_sessions", [], |r| r
+                    .get::<_, i64>(0))?,
+                deadline
+            );
+            headers.append(header::COOKIE, format!("{COOKIE}={token}").parse()?);
+            assert!(session_response(&db, &headers).is_err());
+            response
+        };
+        let session: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await?)?;
+        assert_eq!(session["renew_at"], deadline - 500 - SESSION_SECONDS);
+        Ok(())
+    }
+
     #[test]
     fn folders_search_and_pagination_preserve_literal_path_boundaries() -> Result<()> {
         let f = Fixture::new()?;

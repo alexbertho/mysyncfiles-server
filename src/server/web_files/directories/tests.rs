@@ -90,10 +90,7 @@ async fn management_requires_its_own_cookie_bound_expiring_and_revocable_scope()
         assert!(remove(&f, &forged, "Docs", &token).await.is_err());
     }
     f.grant(&headers, "files.read").await?;
-    assert_eq!(
-        remove(&f, &headers, "Docs", &token).await.unwrap_err().1,
-        "files_manage_required"
-    );
+    assert!(grant(&f.state.db.lock().unwrap(), &headers).is_ok());
     f.grant(&headers, "files.manage").await?;
     f.state
         .db
