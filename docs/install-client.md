@@ -18,13 +18,13 @@ Le script propose les paquets manquants sur Debian/Arch avant tout `sudo`, véri
 
 Avec `MYSYNC_PROFILE=default`, si un ancien profil contient un jeton `token`, l'installateur interactif propose de conserver ce profil et son état de révisions dans un dossier privé `legacy-profile.*` sous la configuration du client, puis reprend l'appairage TPM. Le dossier synchronisé reste à sa place ; sauvegarder séparément ses fichiers importants avant la première synchronisation et examiner les éventuels conflits. Sans terminal, le script s'arrête avec une explication. Un profil qui contient aussi une identité TPM doit être examiné manuellement : l'installateur ne l'archive pas automatiquement. Le jeton ancien n'est jamais accepté comme identité par le nouveau client.
 
-Avec un client signé **0.3.8 ou ultérieur**, l’installateur demande aussi `Enable browser status on this PC? [Y/n]` avant l’appairage. Entrée active la [présence locale sur `/status`](web-status.md) ; répondre `n` la désactive. Une préférence déjà enregistrée devient le choix proposé, même après un appairage interrompu. Pour fixer ce choix sans question :
+Avec le client signé **0.4.2 ou ultérieur**, l’installateur propose une seule question, avec **oui par défaut**, pour autoriser la présence web, la lecture, l’envoi, le renommage/suppression, l’édition et l’exécution locale Python/C. Entrée autorise tout ; répondre `n` désactive tous ces droits. Une réinstallation conserve par défaut les choix enregistrés, y compris une sélection personnalisée et un appairage interrompu. Pour fixer le choix sans question :
 
 ```sh
-curl -fsS --proto '=https' --max-redirs 0 https://raw.githubusercontent.com/alexbertho/mysyncfiles-client/main/deploy/install.sh | MYSYNC_WEB_STATUS=false sh
+curl -fsS --proto '=https' --max-redirs 0 https://raw.githubusercontent.com/alexbertho/mysyncfiles-client/main/deploy/install.sh | MYSYNC_WEB_PERMISSIONS=false sh
 ```
 
-`MYSYNC_WEB_STATUS` accepte `true` ou `false`. Sans terminal, le script affiche la commande `setup` à lancer avec ce choix, sans appairer ni démarrer le service. Une ancienne release dépourvue de ce réglage reste installable sans cette variable ; un choix explicite nécessite une release 0.3.8 ou ultérieure. Après l’installation, utiliser `mysync web-status enable` ou `disable`, puis relancer le daemon. Une réinstallation réussie redémarre le service pour appliquer le binaire et le réglage.
+`MYSYNC_WEB_PERMISSIONS` accepte `true` ou `false`. Sans terminal, le script affiche la commande `setup` à lancer avec ce choix, sans appairer ni démarrer le service. Une ancienne release reste installable avec son parcours de présence seule ; un choix global explicite exige une release 0.4.2 ou ultérieure. `MYSYNC_WEB_STATUS` reste disponible pour la présence seule depuis 0.3.8 ; ne pas combiner les deux variables. Après l’installation, `mysync web-permissions enable` ou `disable` change tous les droits du profil, puis `mysync restart` recharge systemd et redémarre le service utilisateur commun à tous les profils. Une réinstallation réussie effectue déjà ce redémarrage.
 
 Si le certificat EK constructeur manque dans les index NV du TPM, fournir son fichier DER obtenu auprès du fabricant :
 
@@ -54,7 +54,7 @@ Si l'installateur a été lancé sans terminal, démarrer l'appairage sur le cli
 
 Ajouter `--ek-cert /chemin/ek.der` et `--ek-chain /chemin/intermediaires.pem` si nécessaire. Après la première synchronisation, examiner les éventuels fichiers dans `.mysync-conflicts/` avant d'activer le service. Si `mysync setup` a réussi sans conflit hors de l'installateur, démarrer le service avec `systemctl --user enable --now mysync.service`. Pour un démarrage sans session ouverte : `sudo loginctl enable-linger "$(id -un)"`.
 
-Avec le client 0.3.8, ajouter `--web-status false` à `setup` pour désactiver la présence navigateur dès l’appairage. Sans cette option, les nouveaux profils l’activent et une reprise conserve le choix précédent.
+Avec le client récent, ajouter `--web-permissions true` ou `false` à `setup` pour tout autoriser ou tout refuser dès l’appairage. Le choix est conservé lors d’une reprise. Sans cette option, un appairage manuel active seulement la présence sur un nouveau profil et conserve les choix d’un profil existant. Depuis 0.3.8, `--web-status false` désactive uniquement la présence.
 
 ## Parcours manuel avec invitation
 
@@ -112,7 +112,7 @@ mysync --profile maison status
 mysync daemon --all
 ```
 
-La clé publique et l’approbation sont requises pour chaque serveur. Les profils ne partagent ni leurs révisions, ni leur clé de session, ni leurs consentements web. Choisir des dossiers distincts et non imbriqués. Le service installé utilise `daemon --all` ; redémarrer ce service après l’ajout d’un profil pour charger la nouvelle liste.
+La clé publique et l’approbation sont requises pour chaque serveur. Les profils ne partagent ni leurs révisions, ni leur clé de session, ni leurs consentements web. Choisir des dossiers distincts et non imbriqués. Le service installé utilise `daemon --all` ; lancer `mysync restart` après l’ajout d’un profil, une mise à jour ou un changement d’autorisation. Pour un ancien client : `systemctl --user daemon-reload && systemctl --user restart mysync.service`. Si le profil est occupé, attendre ou arrêter le service avec `systemctl --user stop mysync.service` avant la modification. Pour un daemon lancé dans un terminal : Ctrl+C puis relancer sa commande avec les mêmes options.
 
 L’installateur choisit un nom local d’après l’hôte de l’URL ; `MYSYNC_PROFILE=maison` permet de le fixer. `MYSYNC_SERVER_URL=https://sync.example.org` fournit l’URL sans question, notamment sans terminal. Le nom annoncé par le serveur est seulement un libellé ; l’URL et la clé publique restent les références de confiance.
 

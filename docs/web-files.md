@@ -10,14 +10,14 @@ L’interface est constituée de fichiers HTML, CSS et JavaScript natifs dans `w
 
 Le PC Linux du navigateur doit disposer du client **0.3.10 ou ultérieur**, appairé et approuvé sur ce serveur. Le client 0.3.9 publié sait vérifier `/status`, mais ne prend pas en charge `files.read` ni `mysync web-files`. Le déploiement du serveur ne met pas à jour les clients : leur distribution passe toujours par une release signée publiée séparément.
 
-L’autorisation de lire les fichiers est **désactivée par défaut**, y compris pour les profils existants. Elle est distincte de la présence locale :
+L’[installation récente](install-client.md#installer-le-binaire-signe) propose d’autoriser toutes les capacités web, oui par défaut ; répondre non les désactive toutes. Les profils existants conservent leurs choix, et un profil sans consentement de lecture garde ce droit désactivé. La lecture reste réglable séparément de la présence locale :
 
 ```sh
 mysync web-files status
 mysync web-files enable
 ```
 
-Si le daemon verrouille le profil, l’arrêter avant de changer ce réglage. Relancer ensuite le daemon ou le service utilisateur déjà installé et activé. Le pont local doit aussi être actif (`mysync web-status status`, puis `mysync web-status enable` si nécessaire).
+Si le daemon verrouille le profil, l’arrêter avec `systemctl --user stop mysync.service` avant de changer ce réglage, puis lancer `mysync restart`. Cette commande recharge systemd et redémarre le service de tous les profils. Sur un ancien client : `systemctl --user daemon-reload && systemctl --user restart mysync.service`. Pour un daemon lancé dans un terminal, Ctrl+C puis relancer sa commande avec les mêmes options. Le pont local doit aussi être actif (`mysync web-status status`, puis `mysync web-status enable` si nécessaire).
 
 Atlas reconnaît automatiquement le client à l’ouverture. Accepter l’accès local si le navigateur le demande ; le bouton **Vérifier cet appareil** permet de réessayer si nécessaire. Le serveur confirme la preuve TPM et le scope `files.read`, puis la page renouvelle l’accès en arrière-plan : **aucune vérification manuelle toutes les 30 minutes**. Garder le client lancé et la lecture web autorisée. L’autorisation `status.read` ne suffit pas. Les conditions et limites du [pont loopback](web-status.md#acces-local-et-erreurs) restent applicables.
 
@@ -51,7 +51,7 @@ Le consentement d’envoi autorise seulement la création de nouveaux fichiers. 
 
 L’envoi nécessite le client **0.3.11 ou ultérieur** et un serveur incluant cette fonctionnalité. Le client 0.3.10 permet la lecture, mais ne connaît pas `enable-upload`. Les anciens serveurs restent consultables, mais le bouton d’ajout y est désactivé. La publication d’une release cliente signée et son installation sont distinctes d’une modification du code web.
 
-L’autorisation d’envoi est **désactivée par défaut**, même si la lecture est déjà autorisée. Sur le PC du navigateur, arrêter le daemon s’il verrouille le profil, puis exécuter :
+L’autorisation d’envoi est incluse dans le choix global de l’installation. Sans ce choix, activer seulement la lecture ne l’accorde pas. Sur le PC du navigateur, arrêter le daemon s’il verrouille le profil, puis exécuter :
 
 ```sh
 mysync web-files enable
@@ -59,7 +59,7 @@ mysync web-files enable-upload
 mysync web-files status
 ```
 
-Relancer ensuite le client ou son service déjà installé. `status` affiche les réglages de lecture, d’envoi et, sur les clients récents, de gestion des dossiers. Le pont local doit aussi être actif.
+Lancer ensuite `mysync restart` pour le service installé. `status` affiche les réglages de lecture, d’envoi et, sur les clients récents, de gestion des dossiers. Le pont local doit aussi être actif.
 
 Ouvrir le dossier de destination puis déposer les fichiers sur sa liste, ou utiliser **Ajouter des fichiers**, également accessible au clavier et sur téléphone. La zone bleue affiche le chemin de destination ; **Échap** annule le dépôt avant son relâchement. Les résultats de recherche et la navigation en cours n’acceptent pas de dépôt. Un dépôt sur le menu ou hors de la liste n’ajoute rien et n’ouvre pas le fichier dans le navigateur.
 
@@ -77,7 +77,7 @@ Pour refuser les **nouvelles** autorisations d’envoi, utiliser `mysync web-fil
 
 Le menu **…** d’un dossier propose **Propriétés**, **Renommer** et **Supprimer**. Les propriétés indiquent son nom, son chemin, la taille totale, la dernière modification et le nombre de fichiers, sous-dossiers compris. Elles utilisent la session de lecture ; aucun consentement de gestion n’est nécessaire pour les consulter.
 
-Renommer ou supprimer nécessite le client **0.3.12 ou ultérieur**, un serveur incluant ces routes et un consentement distinct, **désactivé par défaut**, même si l’envoi est autorisé :
+Renommer ou supprimer nécessite le client **0.3.12 ou ultérieur**, un serveur incluant ces routes et un consentement de gestion. Le choix global de l’installation inclut ce droit ; activer seulement l’envoi ne l’accorde pas. Pour le régler séparément :
 
 ```sh
 mysync web-files enable

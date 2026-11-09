@@ -8,7 +8,7 @@ La consultation et le téléchargement se font dans l’[explorateur Atlas](web-
 
 Le client doit disposer de la fonctionnalité introduite en **0.3.7**. Vérifier `mysync --version` sur le PC du navigateur. Si nécessaire, lancer `mysync update` après publication de cette release par l'administrateur. Le redéploiement Docker du serveur ne distribue pas automatiquement un nouveau client. Un ancien client 0.3.6 ne reconnaît pas le champ `web_status_enabled`.
 
-À partir de **0.3.8**, l’interface locale est **activée par défaut**. Les nouveaux profils enregistrent `"web_status_enabled": true`. L’installateur propose ce choix avant l’appairage ; répondre non pour la désactiver. Un profil existant sans ce champ utilise également `true`, tandis qu’un `false` enregistré reste respecté lors des mises à jour et des réinstallations.
+À partir de **0.3.8**, l’interface locale est **activée par défaut**. Un profil sans ce champ utilise `true`, tandis qu’un `false` enregistré reste respecté lors des mises à jour. Depuis le client **0.4.2**, l’installateur propose désormais un [choix global](install-client.md#installer-le-binaire-signe), oui par défaut : accepter active toutes les capacités web, refuser les désactive toutes. Une réinstallation conserve les choix enregistrés par défaut.
 
 Le client 0.3.8 permet de consulter et modifier le réglage sans éditer le JSON :
 
@@ -21,8 +21,10 @@ mysync web-status enable
 Ces commandes n’utilisent ni le TPM ni le réseau et ne modifient que le réglage du profil. Si une synchronisation verrouille le profil, attendre sa fin ou arrêter le daemon avant de changer le réglage. Relancer ensuite le daemon concerné. Pour un service utilisateur déjà installé et activé :
 
 ```sh
-systemctl --user restart mysync
+mysync restart
 ```
+
+Cette commande recharge les unités systemd utilisateur puis redémarre `mysync.service` pour tous les profils. Sur un ancien client, utiliser `systemctl --user daemon-reload && systemctl --user restart mysync.service`. Pour un daemon lancé dans un terminal, Ctrl+C puis relancer sa commande avec les mêmes options. Si nécessaire, arrêter le service avant le changement avec `systemctl --user stop mysync.service`.
 
 Ouvrir `https://sync.example.com/status`, en remplaçant le domaine d’exemple par l’origine du serveur configuré, puis cliquer sur **Vérifier**. Accepter la permission d’accès local si le navigateur la demande. Le bouton **Annuler** interrompt l’attente. Chaque actualisation est explicite ; il n’y a pas de sondage périodique du navigateur.
 

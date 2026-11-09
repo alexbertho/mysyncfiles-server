@@ -625,7 +625,7 @@ async fn setup_waits_for_admin_then_syncs_and_is_resumable() -> Result<()> {
             origin_key,
             pending_root,
             client::SetupOptions {
-                web_status_enabled: Some(false),
+                web_permissions_enabled: Some(true),
                 tcti: Some(tcti),
                 ..client::SetupOptions::default()
             },
@@ -644,7 +644,8 @@ async fn setup_waits_for_admin_then_syncs_and_is_resumable() -> Result<()> {
     })
     .await??;
     let pairing: serde_json::Value = serde_json::from_slice(&std::fs::read(&pair_path)?)?;
-    assert_eq!(pairing["web_status_enabled"], false);
+    assert_eq!(pairing["web_status_enabled"], true);
+    assert_eq!(pairing["web_permissions_enabled"], true);
     let id = device_auth::register_pair(&server.state, "setup-client", &code)?;
     let fingerprint = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
@@ -658,7 +659,16 @@ async fn setup_waits_for_admin_then_syncs_and_is_resumable() -> Result<()> {
     .await??;
     let pending: serde_json::Value =
         serde_json::from_slice(&std::fs::read(config.with_extension("enrollment.json"))?)?;
-    assert_eq!(pending["config"]["web_status_enabled"], false);
+    for key in [
+        "web_status_enabled",
+        "web_files_enabled",
+        "web_uploads_enabled",
+        "web_management_enabled",
+        "web_edit_enabled",
+        "web_run_enabled",
+    ] {
+        assert_eq!(pending["config"][key], true, "{key}");
+    }
     // Resume without an explicit flag after the installer was interrupted.
     setup.abort();
     let _ = setup.await;
@@ -685,7 +695,10 @@ async fn setup_waits_for_admin_then_syncs_and_is_resumable() -> Result<()> {
     assert_eq!(outcome.conflicts, 0);
     assert!(!pair_path.exists());
     assert!(config.exists());
-    assert!(!client::load_config(&config)?.web_status_enabled);
+    assert_eq!(
+        client::load_config(&config)?.web_permissions_enabled(),
+        Some(true)
+    );
     let conflict_dir = root.join(".mysync-conflicts");
     std::fs::create_dir(&conflict_dir)?;
     std::fs::write(conflict_dir.join("review.txt"), b"review this file")?;
@@ -701,7 +714,10 @@ async fn setup_waits_for_admin_then_syncs_and_is_resumable() -> Result<()> {
     .await?;
     assert_eq!(resumed.report.uploaded, 0);
     assert_eq!(resumed.conflicts, 1);
-    assert!(!client::load_config(&config)?.web_status_enabled);
+    assert_eq!(
+        client::load_config(&config)?.web_permissions_enabled(),
+        Some(true)
+    );
     std::fs::remove_file(conflict_dir.join("review.txt"))?;
     let cleared = client::setup_with_options(
         &config,
@@ -709,7 +725,7 @@ async fn setup_waits_for_admin_then_syncs_and_is_resumable() -> Result<()> {
         server.state.public_key(),
         root,
         client::SetupOptions {
-            web_status_enabled: Some(true),
+            web_permissions_enabled: Some(false),
             tcti: Some(simulator.tcti.clone()),
             ..client::SetupOptions::default()
         },
@@ -717,7 +733,7 @@ async fn setup_waits_for_admin_then_syncs_and_is_resumable() -> Result<()> {
     .await?;
     assert_eq!(cleared.conflicts, 0);
     let final_config = client::load_config(&config)?;
-    assert!(final_config.web_status_enabled);
+    assert_eq!(final_config.web_permissions_enabled(), Some(false));
     assert_eq!(final_config.identity.unwrap().device, id);
     Ok(())
 }

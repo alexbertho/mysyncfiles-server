@@ -56,13 +56,19 @@ pas un historique de versions du serveur.
 
 Le serveur et le client Linux doivent inclure l’éditeur, disponible à partir
 de la version **0.3.13**. Sur un client déjà installé, lancer `mysync update`,
-puis relancer le daemon pour utiliser le nouveau binaire.
+puis lancer `mysync restart` pour utiliser le nouveau binaire avec le service installé.
 
 La lecture, l’édition et l’exécution sont des consentements distincts. Dans le
 profil du client de ce PC, utiliser `mysync web-files enable`,
 `mysync web-files enable-edit` et, pour exécuter, `mysync web-files enable-run`.
 Les variantes `disable-edit` et `disable-run` retirent ces consentements.
-Arrêter le daemon avant de modifier le profil, puis le relancer.
+Le [choix global de l’installation](install-client.md#installer-le-binaire-signe)
+les accorde ensemble, avec oui proposé par défaut ; répondre non désactive tous
+les droits web. Les profils existants conservent leurs choix.
+Si le profil est occupé, lancer `systemctl --user stop mysync.service` avant de
+le modifier, puis `mysync restart`. Pour un ancien client, utiliser
+`systemctl --user daemon-reload && systemctl --user restart mysync.service`.
+Pour un daemon lancé dans un terminal, Ctrl+C puis relancer sa commande.
 Ces commandes ne démarrent aucun service et n’installent aucun outil.
 
 Chaque autorisation web est liée au cookie de lecture, à l’appareil et à
