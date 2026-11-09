@@ -27,7 +27,7 @@ RUN set -eu; \
 
 FROM scratch
 COPY --from=runtime-deps /runtime/ /
-COPY web /web
+COPY --chmod=0755 web /web
 USER 65532:65532
 EXPOSE 8484
 ENTRYPOINT ["/usr/local/bin/mysync-server"]

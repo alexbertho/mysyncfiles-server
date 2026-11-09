@@ -45,6 +45,112 @@ Sauvegarder de façon cohérente le répertoire de données privé, qui contient
 
 ## Tests et déploiement
 
+### Déploiement continu depuis `main`
+
+Le mode CI/CD utilise les images immuables construites par GitHub Actions.
+Chaque push sur `main` lance les tests Rust, Python, navigateur, TPM avec les
+runtimes Debian/Arch, Clippy, la vérification du bundle et l'audit des dépendances.
+Un seul échec empêche le déploiement. Le serveur vérifie le résultat de **toute**
+la CI, l'origine `push/main`, le commit exact, le digest GitHub de l'artefact,
+les SHA-256 et l'identité de l'image Docker. Il ne reconstruit pas en production.
+
+Un timer systemd utilisateur consulte GitHub chaque minute. Une nouvelle version
+remplace l'ancienne après la CI ; les versions dépassées par un push plus récent
+sont ignorées. Une CI rouge laisse la version active en service. Il faut `gh`
+authentifié sur l'hôte (lecture des artefacts Actions et écriture des statuts du
+dépôt), Docker, Python 3.12 ou plus récent, `cp` et `rsync`. Le jeton reste dans
+la configuration privée de `gh` sur le serveur ; aucun secret de production ni
+port de webhook n'est ajouté à GitHub. Réserver l'écriture sur `main` aux
+personnes autorisées à déployer.
+
+Le serveur impose un seul processus écrivain par dossier de données. Le mode
+CI/CD conserve ce verrou : une passerelle TCP permanente laisse finir les
+requêtes actives, puis retient les nouvelles connexions pendant une courte
+bascule. Les corps et signatures sont transmis sans modification ni rejeu.
+Si une connexion active ne termine pas en dix secondes, la mise à jour est
+abandonnée et le trafic reprend sur l'ancienne version. Les transferts actifs
+ne sont pas interrompus pour forcer un déploiement.
+
+Avant la bascule, l'image est démarrée sur des données temporaires et ses pages,
+assets et contrôles d'accès sont vérifiés. Après vidage des connexions, le
+contrôleur arrête le processus, copie ensemble SQLite/WAL et les blobs dans une
+sauvegarde privée, démarre le candidat, vérifie l'intégrité SQLite et compare
+schéma, identité, appareils et références de fichiers. Il publie ensuite le
+nouveau routage et la documentation par remplacement atomique d'un lien, puis
+libère les requêtes en attente. Une légère hausse de latence est donc possible,
+sans réponse de maintenance ni coupure des requêtes actives.
+
+Une erreur avant publication restaure la sauvegarde et redémarre l'ancienne
+image. Après publication, un échec des contrôles HTTPS déclenche une bascule
+vers l'image précédente **avec les données actuelles** pour conserver les
+écritures déjà acceptées. Le contrôleur refuse automatiquement les migrations
+de schéma et les changements de contenu ou d'identité au démarrage ; leur
+déploiement exige une procédure de migration compatible séparée. systemd
+exécute la récupération après l'arrêt du contrôleur, y compris après SIGKILL,
+et avant de démarrer la passerelle au redémarrage de l'hôte.
+
+Installation depuis le dépôt, en adaptant les chemins de cet exemple :
+
+```sh
+python3 deploy/cicd/install.py \
+  --state-dir "$HOME/.local/share/mysync-cicd" \
+  --data-dir "$HOME/.local/share/mysync-server" \
+  --docs-root /var/www/mysyncfiles/cicd-site \
+  --repository example/mysyncfiles-server \
+  --public-url https://sync.example.org \
+  --container mysyncfiles-server-1 \
+  --revision COMMIT_ACTUEL
+sudo loginctl enable-linger "$USER"
+sudo python3 "$HOME/.local/share/mysync-cicd/bin/activate.py" \
+  --state-dir "$HOME/.local/share/mysync-cicd" \
+  --nginx-config /etc/nginx/sites-available/sync.example.org
+```
+
+L'installation utilisateur démarre la passerelle sur `127.0.0.1:18484`, pointant
+sur le conteneur existant à `127.0.0.1:8484`. Elle attend l'activation Nginx avant
+tout remplacement. La commande root sauvegarde le vhost, prépare un dossier
+public distinct pour la documentation, vérifie la configuration puis recharge
+Nginx sans arrêter ses requêtes. Elle attend aussi la fin des anciens workers
+qui avaient encore des connexions directes au conteneur initial. Les candidats
+utilisent alternativement les ports loopback 18485/18486 ; réserver ces ports.
+
+```sh
+systemctl --user status mysync-cicd-gateway.service mysync-cicd.timer
+journalctl --user -u mysync-cicd.service -f
+python3 "$HOME/.local/share/mysync-cicd/bin/deploy.py" \
+  --state-dir "$HOME/.local/share/mysync-cicd" status
+systemctl --user start mysync-cicd.service  # vérifier main immédiatement
+```
+
+Le statut GitHub `production/deploy` indique le résultat. Une tentative en échec
+est mise en quarantaine ; relancer sa CI sur GitHub ou publier un nouveau commit
+pour réessayer après correction. Un retour arrière manuel utilise :
+
+```sh
+systemctl --user stop mysync-cicd.timer
+python3 "$HOME/.local/share/mysync-cicd/bin/deploy.py" \
+  --state-dir "$HOME/.local/share/mysync-cicd" rollback
+```
+
+Conserver le timer arrêté pendant l'analyse pour éviter de redéployer le même
+`main`. Le réactiver avec `systemctl --user start mysync-cicd.timer` après
+correction. Trois sauvegardes de déploiement récentes et les deux images et
+documentations courantes/précédentes sont conservées. Elles ne remplacent pas
+les sauvegardes externes habituelles. Les scripts installés dans `bin/` sont
+séparés des artefacts applicatifs ; mettre à jour ce contrôleur explicitement
+après revue et tests des changements d'infrastructure.
+
+La file est bornée à 512 connexions et 60 secondes d'attente. Ces limites et les
+délais du client/proxy doivent convenir à la charge et au temps de copie des
+données. Ce mécanisme protège les déploiements planifiés sur un VPS ; une panne
+de l'hôte, du proxy ou du stockage demande une architecture de haute
+disponibilité distincte. Ne pas lancer `make deploy`, `make start` ni modifier le
+montage web du vieux conteneur pour mettre à jour une instance gérée par CI/CD.
+Les commandes d'administration restent possibles dans le conteneur indiqué
+par `status` (`docker exec -it CONTENEUR mysync-server device pair --data-dir /data`).
+
+### Déploiement manuel avec Compose
+
 `make test` vérifie le formatage, les tests du serveur et du paquet commun, le script d’installation serveur et la documentation. Il ne compile pas le client et ne requiert ni pilote TPM ni `swtpm`. Les tests navigateur restent une étape distincte de la CI.
 
 `make test-integration` assemble le serveur et une révision précise du dépôt client dans `integration/`, puis vérifie appairage TPM, transferts, refus, conflits, révocation et pont web. Les bibliothèques TPM manquantes sont fournies par `deploy/Dockerfile.tpm-dev`. Ces contrôles et les vérifications Debian 13/Arch restent requis avant publication. Pour travailler sur des changements coordonnés non commités, utiliser `MYSYNC_INTEGRATION_WORKTREE=1 make test-integration` avec les deux dépôts voisins.

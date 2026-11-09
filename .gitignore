@@ -20,3 +20,5 @@
 deploy/.env
 
 /integration/target/
+/release/
+__pycache__/

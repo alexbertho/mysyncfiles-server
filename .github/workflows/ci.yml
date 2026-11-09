@@ -9,6 +9,8 @@ permissions:
   contents: read
 
 jobs:
+  tpm-integration:
+    uses: ./.github/workflows/integration.yml
   web-status-browser:
     runs-on: ubuntu-24.04
     steps:
@@ -44,8 +46,31 @@ jobs:
       - name: Build server binary
         run: cargo build --release --locked --bin mysync-server
       - name: Build server image
-        run: docker build -f deploy/Dockerfile .
+        run: >-
+          docker build -f deploy/Dockerfile
+          --label org.opencontainers.image.revision="$GITHUB_SHA"
+          -t "mysyncfiles-server:git-$GITHUB_SHA" .
       - name: Audit Rust dependencies
         run: |
           cargo install cargo-audit --locked --version 0.22.2
           cargo audit --file Cargo.lock
+      - name: Build generic deployment documentation
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          install -d -m 0755 site
+          docker compose --env-file deploy/.env.example -f deploy/compose.yaml --profile docs run --rm \
+            --user "$(id -u):$(id -g)" --volume "$PWD/site:/workspace/site" \
+            --env MYSYNC_PUBLIC_URL=https://sync.example.org \
+            --env MYSYNC_DOCS_SITE_URL=https://sync.example.org/docs/ docs build --strict
+      - name: Package immutable deployment
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: python3 deploy/cicd/package.py
+      - name: Store deployment artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: server-${{ github.sha }}
+          path: release/
+          retention-days: 7
+          compression-level: 1
+          if-no-files-found: error

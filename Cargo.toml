@@ -7,7 +7,7 @@ resolver = "2"
 name = "mysyncfiles-server"
 version = "0.4.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "GPL-3.0-only"
 description = "Server-authoritative Linux file synchronization server"
 
@@ -30,7 +30,7 @@ openssl = "0.10"
 url = "2"
 rpassword = "7"
 rustix = { version = "1", features = ["fs"] }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 socket2 = "0.6"
